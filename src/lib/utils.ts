@@ -48,3 +48,36 @@ export function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text
   return text.slice(0, maxLen).trimEnd() + '...'
 }
+
+export function normalizeErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  if (error && typeof error === 'object') {
+    const maybeMessage = (error as { message?: unknown }).message
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage
+  }
+  return 'حدث خطأ غير متوقع'
+}
+
+export interface EdgeMutationState {
+  isIdempotent: boolean
+  isStaleRequest: boolean
+  isDuplicateLike: boolean
+}
+
+export function getEdgeMutationState(result: unknown): EdgeMutationState {
+  const payload = (result && typeof result === 'object' ? result : {}) as {
+    idempotent?: unknown
+    stale_request?: unknown
+    staleRequest?: unknown
+  }
+
+  const isIdempotent = payload.idempotent === true
+  const isStaleRequest = payload.stale_request === true || payload.staleRequest === true
+
+  return {
+    isIdempotent,
+    isStaleRequest,
+    isDuplicateLike: isIdempotent || isStaleRequest,
+  }
+}

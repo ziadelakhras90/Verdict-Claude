@@ -107,6 +107,15 @@ export interface GameResult {
   profiles?: Pick<Profile, 'username'>
 }
 
+export interface ActiveRoomMembership {
+  roomId: string
+  roomCode?: string
+  status: RoomStatus
+  role: Role | null
+  isHost: boolean
+  currentSession?: number
+}
+
 // ─────────────────────────────────────────────
 // UI / Constants
 // ─────────────────────────────────────────────
