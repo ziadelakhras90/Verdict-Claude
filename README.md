@@ -1,161 +1,216 @@
-# ⚖️ قاعة المحكمة — Courthouse Game
+# ⚖️ قاعة المحكمة
 
-لعبة أدوار اجتماعية/محكمة قائمة على المتصفح.  
-مبنية بـ **React + Vite + TypeScript + Supabase** — تُنشر على **Netlify**.
+لعبة أدوار اجتماعية تفاعلية — محكمة من المتصفح مباشرة.
+مبنية بـ **React 18 + Vite + TypeScript + Supabase** — تُنشر على **Netlify**.
 
 ---
 
-## Quick Start
+## الفكرة بسرعة
 
-### 1. المتطلبات
+- كل لاعب يحصل على دور سري: متهم، محامي دفاع، محامي ادعاء، قاضٍ، نائب، شاهد
+- ثلاث جلسات نقاش بمؤقت — كل لاعب يتحدث من منظور دوره
+- القاضي يُصدر حكمه في النهاية
+- تُكشف الحقيقة الفعلية — من فاز ومن خسر؟
+
+---
+
+## المتطلبات
+
 - Node.js 18+
-- حساب على [Supabase](https://supabase.com)
-- حساب على [Netlify](https://netlify.com)
+- حساب [Supabase](https://supabase.com)
+- حساب [Netlify](https://netlify.com)
+- Supabase CLI (للـ Edge Functions)
 
-### 2. إعداد Supabase
+---
 
-1. أنشئ مشروعاً جديداً على supabase.com
-2. انتقل إلى **SQL Editor**
-3. نفِّذ الملفات بهذا الترتيب:
-   ```
-   supabase/migrations/001_full_schema.sql   ← Schema + RLS + sample case
-   supabase/migrations/002_more_cases.sql    ← قضيتان إضافيتان
-   supabase/migrations/003_fix_status_constraint.sql  ← إصلاح constraint
-   supabase/migrations/004_hardening_and_finish_flow.sql  ← finish/reveal hardening
-   supabase/migrations/005_database_hardening.sql  ← DB constraints + unique indexes
-   ```
-4. من **Project Settings → API** احفظ:
-   - `Project URL`
-   - `anon public key`
+## الإعداد خطوة بخطوة
 
-### 3. إعداد المشروع
+### 1. قاعدة البيانات
+
+افتح Supabase Dashboard → **SQL Editor** ونفِّذ هذه الملفات **بالترتيب**:
+
+```
+supabase/migrations/001_full_schema.sql
+supabase/migrations/002_more_cases.sql
+supabase/migrations/003_fix_status_constraint.sql
+supabase/migrations/004_grants_and_stats.sql
+supabase/migrations/005_event_fix_presence_cleanup.sql
+```
+
+### 2. متغيرات البيئة
+
+```bash
+cp .env.example .env
+```
+
+عدِّل `.env`:
+```
+VITE_SUPABASE_URL=https://xxxx.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJ...
+```
+
+### 3. تشغيل محلي
 
 ```bash
 npm install
-cp .env.example .env
-# عدِّل .env بـ URL و anon key
 npm run dev
+# → http://localhost:5173
 ```
 
-### 4. نشر Edge Functions
+### 4. Edge Functions
 
 ```bash
 npm install -g supabase
 supabase login
-supabase link --project-ref YOUR_PROJECT_REF
+supabase link --project-ref YOUR_PROJECT_ID
 
 supabase functions deploy start-game
 supabase functions deploy begin-session
 supabase functions deploy advance-session
 supabase functions deploy reveal-truth
-supabase functions deploy submit-verdict
 ```
 
 ### 5. النشر على Netlify
 
-- Build command: `npm run build`
-- Publish directory: `dist`
-- أضف: `VITE_SUPABASE_URL` و `VITE_SUPABASE_ANON_KEY`
+1. ادفع الكود إلى GitHub
+2. Netlify → **Add new site → Import from Git**
+3. Build settings:
+   - **Build command:** `npm run build`
+   - **Publish directory:** `dist`
+4. Environment variables:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+5. Deploy!
 
 ---
 
-## Game Flow
+## مسار اللعبة الكامل
 
 ```
-Lobby (waiting)
-   ↓ host clicks start
-   ↓ [Edge: start-game] — assigns roles + sets status='starting'
-Card Reading (starting)
-   ↓ each player reads their secret role card
-   ↓ host clicks "Begin Session 1"
-   ↓ [Edge: begin-session] — sets status='in_session'
-Session 1 → 2 → 3 (in_session)
-   ↓ players post statements/questions/objections
-   ↓ judge advances each session  [Edge: advance-session]
-Verdict Phase (verdict)
-   ↓ judge submits verdict  [Edge: submit-verdict]
-Reveal Truth (reveal)
-   ↓ host reveals truth  [Edge: reveal-truth] — computes winners
-Results (finished)
+/              الصفحة الرئيسية
+/auth          تسجيل دخول / إنشاء حساب
+/setup         اختيار اسم اللاعب (مرة واحدة)
+/create        إنشاء غرفة جديدة
+/join/:code    الانضمام بالكود
+
+/room/:id/lobby    غرفة الانتظار
+                   ↓ host يضغط "ابدأ" [start-game]
+/room/:id/card     كل لاعب يقرأ بطاقته السرية
+                   ↓ host يضغط "ابدأ الجلسة 1" [begin-session]
+/room/:id/session  جلسة 1 → 2 → 3  [advance-session]
+                   القاضي → /room/:id/judge
+                   ↓ بعد الجلسة 3
+/room/:id/verdict  القاضي يصدر حكمه
+                   ↓
+/room/:id/reveal   كشف الحقيقة [reveal-truth]
+                   ↓
+/room/:id/results  النتائج + إحصائيات الفوز
 ```
 
 ---
 
-## Roles & Win Conditions
+## الأدوار وشروط الفوز
 
-| الدور | الهدف | يعرف الحقيقة؟ |
+| الدور | يعرف الحقيقة؟ | شرط الفوز |
 |---|---|---|
-| المتهم | الحصول على حكم البراءة | ✅ |
-| محامي الدفاع | إثبات براءة موكله | ✅ |
-| محامي الادعاء | الحصول على حكم الإدانة | ❌ |
-| القاضي | حكمه يطابق الحقيقة | ❌ |
-| النائب | مساعدة على الوصول للحقيقة | ❌ |
-| الشاهد | شهادة صادقة تقود للحقيقة | ❌ |
+| المتهم | ✅ | صدور حكم البراءة |
+| محامي الدفاع | ✅ | صدور حكم البراءة |
+| محامي الادعاء | ❌ | صدور حكم الإدانة |
+| القاضي | ❌ | حكمه يطابق الحقيقة |
+| النائب | ❌ | الحكم يطابق الحقيقة |
+| الشاهد | ❌ | الحكم يطابق الحقيقة |
 
 ---
 
-## Sample Cases (3 included)
+## القضايا المضمّنة (3 قضايا)
 
-| القضية | الفئة | صعوبة | لاعبون |
+| القضية | الفئة | الصعوبة | اللاعبون |
 |---|---|---|---|
-| السكرتيرة المختفية | قتل | ★★ | 4-6 |
-| العقد المسروق | سرقة | ★ | 4-5 |
-| رئيس الشركة المسموم | قتل | ★★★ | 5-6 |
+| السكرتيرة المختفية | قتل | ★★ | 4–6 |
+| العقد المسروق | سرقة | ★ | 4–5 |
+| رئيس الشركة المسموم | قتل | ★★★ | 5–6 |
+
+### إضافة قضية جديدة
+
+في Supabase Dashboard → Table Editor:
+
+1. أضف صفاً في `case_templates` مع جميع الحقول
+2. أضف بطاقة دور في `case_role_cards` لكل دور (حسب عدد اللاعبين)
+3. تأكد: `is_active = true` و `actual_verdict = 'guilty' | 'innocent'`
 
 ---
 
-## Security Architecture
+## الأمان
 
-- **RLS** مفعّلة على كل الجداول
-- `player_role_data` → كل لاعب يقرأ كارته فقط (`player_id = auth.uid()`)
-- `case_templates` → محظور على الـ client — يُقرأ عبر `public_case_info` view فقط
-- `actual_verdict` + `hidden_truth` → لا تُرسل للـ client أبدًا — Edge Functions فقط
-- كل العمليات الحساسة تستخدم `SUPABASE_SERVICE_ROLE_KEY`
+| الجدول | من يقرأ؟ | من يكتب؟ |
+|---|---|---|
+| `case_templates` | ❌ (view فقط) | Service role |
+| `public_case_info` (view) | Authenticated | — |
+| `player_role_data` | صاحب الكارت فقط | Service role |
+| `game_results` | أعضاء الغرفة بعد `reveal` | Service role |
+| `game_events` | أعضاء الغرفة | أعضاء الغرفة (في `in_session`) |
+| `verdicts` | أعضاء الغرفة | القاضي فقط |
+
+`actual_verdict` و `hidden_truth` لا تصلان للـ client أبدًا — Edge Functions فقط.
 
 ---
 
-## Project Structure
+## هيكل المشروع
 
 ```
 src/
-├── actions/          createRoom, joinRoom, startGame, beginSession, ...
+├── actions/         جميع عمليات Supabase (createRoom, joinRoom, startGame, ...)
 ├── components/
-│   ├── game/         EventFeed, RoleCardDisplay, SessionTimer, CountdownRing, CaseInfoPanel
-│   ├── layout/       AppShell, ProtectedRoute
-│   ├── room/         PlayerList
-│   └── ui/           Button, Card, Avatar, Input, Modal, Toast, ...
-├── hooks/            useAuth, useRoom, useRoomGuard, useSessionTimer, useToast, ...
-├── lib/              supabase.ts, types.ts, utils.ts
-├── pages/            Home, Auth, CreateRoom, JoinRoom, Lobby, RoleCard,
-│                     Session, JudgePanel, Verdict, Reveal, Results, NotFound
-├── stores/           authStore, roomStore
-└── router.tsx
+│   ├── game/        EventFeed, RoleCardDisplay, SessionTimer,
+│   │                CountdownRing, CaseInfoPanel, GamePhaseBar
+│   ├── layout/      AppShell, ProtectedRoute
+│   ├── room/        PlayerList, HostTransferModal, InviteToast
+│   └── ui/          Button, Card, Avatar, Input, Modal,
+│                    Toast, Skeletons, ErrorBoundary, ConnectionLostOverlay
+├── hooks/           useAuth, useRoom, useRoomGuard, useRoomMembership,
+│                    usePresence, useSessionTimer, useToast, useCurrentUser
+├── lib/             supabase.ts, types.ts, utils.ts
+├── pages/           17 صفحة (lazy-loaded كل صفحة)
+├── stores/          authStore, roomStore (Zustand)
+└── router.tsx       React Router v6 + Suspense lazy
 
 supabase/
 ├── config.toml
-├── functions/        start-game, begin-session, advance-session, submit-verdict, reveal-truth
-└── migrations/       001 schema, 002 cases, 003 fix, 004 hardening, 005 db hardening
+├── functions/       start-game, begin-session, advance-session, reveal-truth
+└── migrations/      001–005
 ```
 
 ---
 
-## Stability Improvements Included
+## البنية التقنية
 
-النسخة الحالية تتضمن تحسينات مهمة على الثبات والتعامل مع الـreconnect والـrace conditions:
-- Resume / reconnect flow من Home و Auth
-- Route guard موحد حسب حالة الغرفة ودور اللاعب
-- حماية من double-submit في العمليات الحساسة
-- Idempotency في Edge Functions الأساسية
-- تقليل flicker وstale data في `useRoom` و `roomStore`
-- Reveal / Results flow أكثر أمانًا عند تأخر البيانات
-- Database hardening عبر constraints و unique indexes
+- **Framework:** React 18 + Vite 5
+- **Language:** TypeScript (صفر أخطاء)
+- **Routing:** React Router v6 (lazy-loaded)
+- **State:** Zustand
+- **Backend:** Supabase (Auth + DB + Realtime + Edge Functions)
+- **Styling:** Tailwind CSS
+- **Fonts:** IBM Plex Sans Arabic + Playfair Display + IBM Plex Mono
+- **Deploy:** Netlify (static)
+
+### Bundle sizes (gzip)
+
+| Chunk | Size |
+|---|---|
+| vendor-react | 66 KB |
+| vendor-supabase | 52 KB |
+| app entry | 5 KB |
+| per-page chunks | 1–4 KB each |
 
 ---
 
-## Verification
+## التوسع المستقبلي
 
-راجع ملف [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md) قبل الإطلاق أو بعد أي تغييرات حساسة على Supabase / Edge Functions.
-
-## Testing
-
-See `TESTING.md` for the automated and manual test plan.
+- [ ] شاهد الزور / النائب المرتشي
+- [ ] نظام نقاط متراكمة عبر مباريات
+- [ ] وضع المتفرج (spectator mode)
+- [ ] تصميم 2D مرئي / أنيميشن
+- [ ] مؤثرات صوتية وموسيقى
+- [ ] تاريخ المباريات لكل لاعب
+- [ ] قضايا تتكشف تدريجياً (clues per round)
+- [ ] نظام تصويت جماعي بدلاً من حكم فردي

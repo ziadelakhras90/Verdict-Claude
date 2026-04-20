@@ -2,35 +2,43 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '@/components/layout'
 import { Button, Card } from '@/components/ui'
+import { InviteToast } from '@/components/room/InviteToast'
 import { createRoom } from '@/actions'
-import { cn, normalizeErrorMessage } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 
 export default function CreateRoom() {
   const navigate = useNavigate()
+
   const [maxPlayers, setMaxPlayers]   = useState(6)
   const [duration, setDuration]       = useState(180)
   const [loading, setLoading]         = useState(false)
   const [error, setError]             = useState('')
+  const [createdCode, setCreatedCode] = useState<string | null>(null)
+  const [roomId, setRoomId]           = useState<string | null>(null)
 
   const DURATION_OPTIONS = [
-    { value: 60,  label: '1 دقيقة',   desc: 'سريع جداً' },
-    { value: 120, label: '2 دقيقة',   desc: 'سريع' },
-    { value: 180, label: '3 دقائق',   desc: 'عادي' },
-    { value: 300, label: '5 دقائق',   desc: 'مطوّل' },
+    { value: 60,  label: '1 دقيقة',  desc: 'سريع جداً' },
+    { value: 120, label: '2 دقيقة',  desc: 'سريع' },
+    { value: 180, label: '3 دقائق',  desc: 'عادي ✓' },
+    { value: 300, label: '5 دقائق',  desc: 'مطوّل' },
   ]
 
   async function handleCreate() {
-    if (loading) return
     setLoading(true)
     setError('')
     try {
       const room = await createRoom({ maxPlayers, sessionDurationSeconds: duration })
-      navigate(`/room/${room.id}/lobby`)
+      setCreatedCode(room.room_code)
+      setRoomId(room.id)
     } catch (err) {
-      setError(normalizeErrorMessage(err, 'فشل إنشاء الغرفة'))
+      setError(err instanceof Error ? err.message : 'فشل إنشاء الغرفة')
     } finally {
       setLoading(false)
     }
+  }
+
+  function goToLobby() {
+    if (roomId) navigate(`/room/${roomId}/lobby`)
   }
 
   return (
@@ -40,7 +48,7 @@ export default function CreateRoom() {
 
           <div className="text-center">
             <h1 className="font-display text-3xl text-gold mb-1">إنشاء غرفة</h1>
-            <p className="text-ink-400 text-sm">اضبط إعدادات جلستك</p>
+            <p className="text-ink-400 text-sm">اضبط إعدادات المحاكمة</p>
           </div>
 
           <Card className="space-y-6">
@@ -54,7 +62,7 @@ export default function CreateRoom() {
                     key={n}
                     onClick={() => setMaxPlayers(n)}
                     className={cn(
-                      'flex-1 py-2.5 rounded-lg text-sm font-body border transition-all duration-150',
+                      'flex-1 py-2.5 rounded-lg text-sm font-body border transition-all duration-150 active:scale-95',
                       maxPlayers === n
                         ? 'bg-gold text-ink-900 border-gold font-semibold'
                         : 'border-gold/20 text-ink-300 hover:border-gold/40'
@@ -65,11 +73,14 @@ export default function CreateRoom() {
                 ))}
               </div>
               {maxPlayers < 5 && (
-                <p className="text-xs text-ink-500">⚠️ مع 4 لاعبين لن يكون هناك نائب أو شاهد</p>
+                <p className="text-xs text-ink-500 flex items-center gap-1">
+                  <span>⚠️</span>
+                  <span>مع 4 لاعبين: المتهم، المحامين، القاضي فقط (بدون نائب أو شاهد)</span>
+                </p>
               )}
             </div>
 
-            {/* Session Duration */}
+            {/* Duration */}
             <div className="space-y-3">
               <p className="label-sm">مدة كل جلسة</p>
               <div className="grid grid-cols-2 gap-2">
@@ -78,7 +89,7 @@ export default function CreateRoom() {
                     key={opt.value}
                     onClick={() => setDuration(opt.value)}
                     className={cn(
-                      'p-3 rounded-xl border text-right transition-all duration-150',
+                      'p-3 rounded-xl border text-right transition-all duration-150 active:scale-95',
                       duration === opt.value
                         ? 'border-gold/60 bg-gold/10'
                         : 'border-gold/20 hover:border-gold/40'
@@ -94,13 +105,13 @@ export default function CreateRoom() {
             </div>
 
             {/* Summary */}
-            <div className="bg-ink-800/60 rounded-xl p-4 space-y-1 text-sm">
+            <div className="bg-ink-800/60 rounded-xl p-4 space-y-1.5 text-sm">
               <div className="flex justify-between">
                 <span className="text-ink-400">اللاعبون</span>
                 <span className="text-parch-200">حتى {maxPlayers}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-ink-400">كل جلسة</span>
+                <span className="text-ink-400">مدة الجلسة</span>
                 <span className="text-parch-200">{DURATION_OPTIONS.find(d => d.value === duration)?.label}</span>
               </div>
               <div className="flex justify-between">
@@ -110,14 +121,18 @@ export default function CreateRoom() {
             </div>
 
             {error && (
-              <p className="text-sm text-blood-300 bg-blood/10 border border-blood/30 rounded-lg px-3 py-2">
-                {error}
-              </p>
+              <p className="text-sm text-blood-300 bg-blood/10 border border-blood/30 rounded-lg px-3 py-2">{error}</p>
             )}
 
-            <Button variant="primary" size="lg" loading={loading} onClick={handleCreate} className="w-full">
-              إنشاء الغرفة
-            </Button>
+            {createdCode ? (
+              <Button variant="primary" size="lg" onClick={goToLobby} className="w-full">
+                الانتقال لغرفة الانتظار ←
+              </Button>
+            ) : (
+              <Button variant="primary" size="lg" loading={loading} onClick={handleCreate} className="w-full">
+                إنشاء الغرفة
+              </Button>
+            )}
           </Card>
 
           <button onClick={() => navigate('/')} className="w-full text-xs text-ink-600 hover:text-ink-400 transition-colors">
@@ -125,6 +140,11 @@ export default function CreateRoom() {
           </button>
         </div>
       </div>
+
+      {/* Invite toast shown after room is created */}
+      {createdCode && (
+        <InviteToast roomCode={createdCode} onDismiss={goToLobby} />
+      )}
     </AppShell>
   )
 }

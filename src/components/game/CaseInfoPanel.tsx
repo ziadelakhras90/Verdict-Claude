@@ -11,10 +11,6 @@ interface CaseInfoPanelProps {
 const DIFFICULTY_STARS = ['', '★', '★★', '★★★']
 
 export function CaseInfoPanel({ caseInfo, compact = false }: CaseInfoPanelProps) {
-  const visibleFacts = compact
-    ? (caseInfo.public_facts ?? []).slice(0, 2)
-    : (caseInfo.public_facts ?? [])
-
   return (
     <div className={cn('space-y-3', compact ? '' : 'card-glass rounded-2xl p-5')}>
       <div className="flex items-start justify-between gap-3">
@@ -39,20 +35,17 @@ export function CaseInfoPanel({ caseInfo, compact = false }: CaseInfoPanelProps)
         {caseInfo.public_summary}
       </p>
 
-      {visibleFacts.length > 0 && (
+      {!compact && Array.isArray(caseInfo.public_facts) && caseInfo.public_facts.length > 0 && (
         <div className="space-y-1.5 pt-1">
-          <p className="label-sm">حقائق مُعلنة للنقاش</p>
+          <p className="label-sm">الحقائق المُعلَنة</p>
           <ul className="space-y-1">
-            {visibleFacts.map((fact, i) => (
-              <li key={`${fact}-${i}`} className={cn('flex gap-2 text-parch-300', compact ? 'text-xs' : 'text-sm')}>
+            {(caseInfo.public_facts as string[]).map((fact, i) => (
+              <li key={i} className="flex gap-2 text-sm text-parch-300">
                 <span className="text-gold/50 select-none mt-0.5">◆</span>
                 <span>{fact}</span>
               </li>
             ))}
           </ul>
-          {compact && (caseInfo.public_facts?.length ?? 0) > visibleFacts.length && (
-            <p className="text-[11px] text-ink-500">افتح تفاصيل القضية لرؤية باقي الحقائق.</p>
-          )}
         </div>
       )}
     </div>

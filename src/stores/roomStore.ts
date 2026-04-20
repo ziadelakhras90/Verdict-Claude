@@ -4,8 +4,7 @@ import type {
   GameResult, PublicCaseInfo
 } from '@/lib/types'
 
-export interface RoomStore {
-  scopedRoomId: string | null
+interface RoomStore {
   room:        GameRoom | null
   players:     RoomPlayer[]
   myCard:      RoleCard | null
@@ -15,76 +14,69 @@ export interface RoomStore {
   isConnected: boolean
   revealData:  { actual_verdict: string; hidden_truth: string } | null
 
-  scopeToRoom:   (roomId: string) => void
   setRoom:       (room: GameRoom) => void
   updateRoom:    (partial: Partial<GameRoom>) => void
   setPlayers:    (players: RoomPlayer[]) => void
   upsertPlayer:  (player: RoomPlayer) => void
   updatePlayer:  (playerId: string, partial: Partial<RoomPlayer>) => void
   removePlayer:  (playerId: string) => void
-  setMyCard:     (card: RoleCard | null) => void
-  setCaseInfo:   (info: PublicCaseInfo | null) => void
+  setMyCard:     (card: RoleCard) => void
+  setCaseInfo:   (info: PublicCaseInfo) => void
   addEvent:      (event: GameEvent) => void
   setEvents:     (events: GameEvent[]) => void
   setResults:    (results: GameResult[]) => void
   setConnected:  (v: boolean) => void
-  setRevealData: (data: { actual_verdict: string; hidden_truth: string } | null) => void
+  setRevealData: (data: { actual_verdict: string; hidden_truth: string }) => void
   reset:         () => void
 }
 
-const initialState = {
-  scopedRoomId: null,
-  room: null,
-  players: [],
-  myCard: null,
-  caseInfo: null,
-  events: [],
-  results: [],
+const EMPTY = {
+  room:        null as GameRoom | null,
+  players:     [] as RoomPlayer[],
+  myCard:      null as RoleCard | null,
+  caseInfo:    null as PublicCaseInfo | null,
+  events:      [] as GameEvent[],
+  results:     [] as GameResult[],
   isConnected: false,
-  revealData: null,
-}
-
-function sortPlayers(players: RoomPlayer[]) {
-  return [...players].sort((a, b) => new Date(a.joined_at).getTime() - new Date(b.joined_at).getTime())
-}
-
-function mergeUniqueEvents(events: GameEvent[]) {
-  const byId = new Map<string, GameEvent>()
-  for (const event of events) byId.set(event.id, event)
-  return [...byId.values()].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  revealData:  null as { actual_verdict: string; hidden_truth: string } | null,
 }
 
 export const useRoomStore = create<RoomStore>((set) => ({
-  ...initialState,
+  ...EMPTY,
 
-  scopeToRoom: (roomId) => set((state) => {
-    if (state.scopedRoomId === roomId) return state
-    return { ...initialState, scopedRoomId: roomId }
-  }),
+  setRoom:    (room)    => set({ room }),
+  updateRoom: (partial) => set(s => ({
+    room: s.room ? { ...s.room, ...partial } : null,
+  })),
 
-  setRoom: (room) => set({ room, scopedRoomId: room.id }),
-  updateRoom: (partial) => set(s => ({ room: s.room ? { ...s.room, ...partial } : null })),
-
-  setPlayers:   (players) => set({ players: sortPlayers(players) }),
-  upsertPlayer: (player)  => set(s => ({
-    players: sortPlayers([
+  setPlayers: (players) => set({ players }),
+  upsertPlayer: (player) => set(s => ({
+    players: [
       ...s.players.filter(p => p.player_id !== player.player_id),
       player,
-    ]),
+    ].sort((a, b) =>
+      new Date(a.joined_at).getTime() - new Date(b.joined_at).getTime()
+    ),
   })),
   updatePlayer: (playerId, partial) => set(s => ({
-    players: s.players.map(p => p.player_id === playerId ? { ...p, ...partial } : p),
+    players: s.players.map(p =>
+      p.player_id === playerId ? { ...p, ...partial } : p
+    ),
   })),
   removePlayer: (playerId) => set(s => ({
     players: s.players.filter(p => p.player_id !== playerId),
   })),
 
-  setMyCard:     (myCard)      => set({ myCard }),
-  setCaseInfo:   (caseInfo)    => set({ caseInfo }),
-  addEvent:      (event)       => set(s => ({ events: mergeUniqueEvents([...s.events, event]) })),
-  setEvents:     (events)      => set({ events: mergeUniqueEvents(events) }),
+  setMyCard:   (myCard)   => set({ myCard }),
+  setCaseInfo: (caseInfo) => set({ caseInfo }),
+  addEvent:    (event)    => set(s => ({
+    events: s.events.some(e => e.id === event.id)
+      ? s.events
+      : [...s.events, event],
+  })),
+  setEvents:     (events)      => set({ events }),
   setResults:    (results)     => set({ results }),
   setConnected:  (isConnected) => set({ isConnected }),
   setRevealData: (revealData)  => set({ revealData }),
-  reset:         ()            => set(initialState),
+  reset:         ()            => set({ ...EMPTY }),
 }))

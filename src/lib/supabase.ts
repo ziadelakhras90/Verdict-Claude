@@ -1,66 +1,61 @@
 import { createClient } from '@supabase/supabase-js'
-import { normalizeErrorMessage } from '@/lib/utils'
 
-const supabaseUrl  = import.meta.env.VITE_SUPABASE_URL  as string
-const supabaseKey  = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
 
 if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY in .env')
+  throw new Error(
+    'Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY.\n' +
+    'Copy .env.example to .env and fill in your Supabase credentials.'
+  )
 }
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
-    persistSession:  true,
+    persistSession:   true,
     autoRefreshToken: true,
-    storageKey: 'courthouse-auth',
+    storageKey:       'courthouse-auth-v2',
+    // Anonymous sessions persist across page loads
+    detectSessionInUrl: false,
   },
   realtime: {
-    params: { eventsPerSecond: 10 }
-  }
+    params: { eventsPerSecond: 10 },
+  },
 })
 
-export async function callEdgeFunction<T = unknown>(
+/**
+ * Call a Supabase Edge Function with the current user's JWT.
+ * Throws with a human-readable Arabic error on failure.
+ */
+export async function callEdgeFunction<T = { ok: boolean; error?: string }>(
   name: string,
   body: Record<string, unknown>
 ): Promise<T> {
   const { data: { session } } = await supabase.auth.getSession()
-  if (!session) throw new Error('Not authenticated')
 
-  let response: Response
-  try {
-    response = await fetch(
-      `${supabaseUrl}/functions/v1/${name}`,
-      {
-        method:  'POST',
-        headers: {
-          'Content-Type':  'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify(body),
-      }
-    )
-  } catch (error) {
-    throw new Error(normalizeErrorMessage(error, 'تعذر الاتصال بالخادم'))
+  if (!session?.access_token) {
+    throw new Error('يجب تسجيل الدخول أولاً')
   }
 
-  let result: unknown = null
-  try {
-    result = await response.json()
-  } catch {
-    if (!response.ok) {
-      throw new Error(`فشل الطلب (${response.status})`)
+  const { data, error } = await supabase.functions.invoke(name, {
+    body,
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+    },
+  })
+
+  if (error) {
+    const message = error.message || ''
+    console.error(`[callEdgeFunction:${name}]`, error)
+    if (message.includes('Failed to fetch') || message.includes('NetworkError') || message.includes('CORS')) {
+      throw new Error('تعذر الاتصال بالخادم — تأكد من نشر الـ Edge Function وإعدادات CORS')
     }
+    throw new Error(message || 'تعذر تنفيذ الطلب')
   }
 
-  if (!response.ok) {
-    const message = result && typeof result === 'object' && 'error' in result
-      ? normalizeErrorMessage((result as { error?: unknown }).error, `فشل الطلب (${response.status})`)
-      : `فشل الطلب (${response.status})`
-    throw new Error(message)
-  }
-
-  if (result && typeof result === 'object' && 'ok' in result && !(result as { ok?: boolean }).ok) {
-    throw new Error(normalizeErrorMessage(result, 'Edge function error'))
+  const result = (data ?? {}) as Record<string, unknown>
+  if (result.ok === false) {
+    throw new Error((result.error as string) ?? 'تعذر تنفيذ الطلب')
   }
 
   return result as T

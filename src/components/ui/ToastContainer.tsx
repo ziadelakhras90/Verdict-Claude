@@ -1,5 +1,4 @@
 import { useToastStore } from '@/hooks/useToast'
-import type { ToastItem } from '@/hooks/useToast'
 import { cn } from '@/lib/utils'
 
 const STYLES = {
@@ -12,13 +11,13 @@ const STYLES = {
 const ICONS = { info: 'ℹ️', success: '✓', error: '✗', warn: '⚠️' }
 
 export function ToastContainer() {
-  const toasts = useToastStore((s) => s.toasts)
-  const remove = useToastStore((s) => s.remove)
+  const toasts = useToastStore(s => s.toasts)
+  const remove = useToastStore(s => s.remove)
   if (!toasts.length) return null
 
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center w-full max-w-sm px-4 pointer-events-none">
-      {toasts.map((t: ToastItem) => (
+      {toasts.map(t => (
         <div
           key={t.id}
           onClick={() => remove(t.id)}
