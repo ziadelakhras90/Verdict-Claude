@@ -49,35 +49,38 @@ export function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen).trimEnd() + '...'
 }
 
-export function normalizeErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim()) return error.message
-  if (typeof error === 'string' && error.trim()) return error
-  if (error && typeof error === 'object') {
-    const maybeMessage = (error as { message?: unknown }).message
-    if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage
-  }
-  return 'حدث خطأ غير متوقع'
-}
-
 export interface EdgeMutationState {
-  isIdempotent: boolean
-  isStaleRequest: boolean
-  isDuplicateLike: boolean
+  isDuplicate: boolean
+  isStale: boolean
 }
 
 export function getEdgeMutationState(result: unknown): EdgeMutationState {
-  const payload = (result && typeof result === 'object' ? result : {}) as {
-    idempotent?: unknown
-    stale_request?: unknown
-    staleRequest?: unknown
+  if (!result || typeof result !== 'object') {
+    return { isDuplicate: false, isStale: false }
   }
 
-  const isIdempotent = payload.idempotent === true
-  const isStaleRequest = payload.stale_request === true || payload.staleRequest === true
+  const record = result as Record<string, unknown>
+  const isDuplicate = Boolean(
+    record.isDuplicate ?? record.is_duplicate ?? record.idempotent ?? record.duplicate,
+  )
+  const isStale = Boolean(
+    record.isStale ?? record.is_stale ?? record.stale_request ?? record.stale,
+  )
 
-  return {
-    isIdempotent,
-    isStaleRequest,
-    isDuplicateLike: isIdempotent || isStaleRequest,
+  return { isDuplicate, isStale }
+}
+
+export function normalizeErrorMessage(error: unknown, fallback = 'حدث خطأ غير متوقع'): string {
+  if (typeof error === 'string') return error
+  if (error instanceof Error) return error.message || fallback
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>
+    const candidates = [record.message, record.error, record.details, record.hint]
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate
+      }
+    }
   }
+  return fallback
 }

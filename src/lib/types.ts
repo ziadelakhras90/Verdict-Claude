@@ -107,15 +107,6 @@ export interface GameResult {
   profiles?: Pick<Profile, 'username'>
 }
 
-export interface ActiveRoomMembership {
-  roomId: string
-  roomCode?: string
-  status: RoomStatus
-  role: Role | null
-  isHost: boolean
-  currentSession?: number
-}
-
 // ─────────────────────────────────────────────
 // UI / Constants
 // ─────────────────────────────────────────────
@@ -168,4 +159,14 @@ export const SESSION_LABELS: Record<number, string> = {
   1: 'جلسة الاستماع الأولى',
   2: 'جلسة المرافعات',
   3: 'جلسة الخلاصة',
+}
+
+
+export interface ActiveRoomMembership {
+  roomId: string
+  room_id: string
+  role: Role | null
+  is_host?: boolean
+  gameRoom?: Pick<GameRoom, 'status' | 'current_session'> | null
+  game_rooms?: Pick<GameRoom, 'status' | 'current_session'> | null
 }
