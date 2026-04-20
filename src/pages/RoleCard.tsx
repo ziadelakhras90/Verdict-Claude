@@ -12,7 +12,8 @@ import { ToastContainer } from '@/components/ui/ToastContainer'
 import { RoleCardDisplay } from '@/components/game/RoleCardDisplay'
 import { CaseInfoPanel } from '@/components/game/CaseInfoPanel'
 import type { RoleCard } from '@/lib/types'
-import { cn } from '@/lib/utils'
+import { cn, normalizeErrorMessage } from '@/lib/utils'
+import { getEdgeMutationFeedback } from '@/lib/edgeMutation'
 
 export default function RoleCardPage() {
   const { id: roomId } = useParams<{ id: string }>()
@@ -20,7 +21,8 @@ export default function RoleCardPage() {
   const currentUserId  = useCurrentUser()
   const toast          = useToast()
   useRoom(roomId)
-  useRoomGuard(roomId, ['starting', 'in_session'])
+  // Accept both 'starting' (reading cards) and 'in_session' (already started)
+  useRoomGuard(roomId, ['starting', 'in_session'], ['card', 'session', 'judge'])
 
   const room     = useRoomStore(s => s.room)
   const caseInfo = useRoomStore(s => s.caseInfo)
@@ -29,65 +31,49 @@ export default function RoleCardPage() {
   const [card, setCard]           = useState<RoleCard | null>(null)
   const [loading, setLoading]     = useState(true)
   const [beginning, setBeginning] = useState(false)
-  const [retries, setRetries]     = useState(0)
+  const [readyCount, setReadyCount] = useState(0)
 
   const isHost = room?.host_id === currentUserId
 
-  // Fetch role card with retries (edge function might be slightly delayed)
   useEffect(() => {
     if (!roomId || !currentUserId) return
-    let cancelled = false
+    fetchMyRoleCard(roomId).then(data => {
+      if (data) setCard(data as RoleCard)
+      setLoading(false)
+    })
+  }, [roomId, currentUserId])
 
-    async function load() {
-      const data = await fetchMyRoleCard(roomId!)
-      if (cancelled) return
-
-      if (data) {
-        setCard(data as RoleCard)
-        setLoading(false)
-      } else if (retries < 5) {
-        // Retry after a short delay (role assignment might be in progress)
-        setTimeout(() => {
-          if (!cancelled) setRetries(r => r + 1)
-        }, 1200)
-      } else {
-        setLoading(false)
-        toast.error('تأخر تحميل بطاقة الدور — حاول تحديث الصفحة')
-      }
-    }
-
-    load()
-    return () => { cancelled = true }
-  }, [roomId, currentUserId, retries])
-
-  // If room status jumped to in_session (e.g. reconnecting after beginSession)
+  // Count how many players have clicked ready (is_ready re-used here as "card read")
   useEffect(() => {
-    if (room?.status === 'in_session' && card) {
-      // Small delay to let user see their card
-    }
-  }, [room?.status, card])
+    setReadyCount(players.filter(p => p.is_ready).length)
+  }, [players])
 
   async function handleBeginSession() {
     if (!roomId) return
     setBeginning(true)
     try {
-      await beginSession(roomId)
-      // useRoomGuard will redirect to /session automatically
+      const result = await beginSession(roomId, 'starting')
+      const feedback = getEdgeMutationFeedback('begin-session', result)
+      toast[feedback.variant](feedback.message)
+      // useRoomGuard will redirect everyone to /session automatically
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'فشل بدء الجلسة')
+      toast.error(normalizeErrorMessage(err, 'فشل بدء الجلسة'))
+    } finally {
       setBeginning(false)
     }
+  }
+
+  function handleGoToSession() {
+    navigate(`/room/${roomId}/session`)
   }
 
   if (loading) return (
     <AppShell>
       <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 text-center">
-          <div className="text-5xl animate-flicker">🃏</div>
+        <div className="flex flex-col items-center gap-4">
+          <div className="text-5xl animate-flicker">⚖️</div>
           <Spinner size={28} />
-          <p className="text-ink-500 text-sm animate-pulse">
-            {retries > 0 ? `جارٍ تحميل بطاقتك... (${retries}/5)` : 'جارٍ تجهيز دورك السري...'}
-          </p>
+          <p className="text-ink-500 text-sm animate-pulse">جارٍ تجهيز بطاقتك السرية...</p>
         </div>
       </div>
     </AppShell>
@@ -95,12 +81,12 @@ export default function RoleCardPage() {
 
   return (
     <AppShell>
-      <div className="min-h-screen p-4 py-8 pb-28">
+      <div className="min-h-screen p-4 py-8 pb-24">
         <div className="max-w-md mx-auto space-y-5">
 
-          <div className="text-center">
-            <h1 className="font-display text-2xl text-gold">بطاقة دورك السرية</h1>
-            <p className="text-xs text-ink-500 mt-1">اقرأها بعناية — هذه بطاقتك وحدك</p>
+          <div className="text-center space-y-1">
+            <h1 className="font-display text-2xl text-gold">بطاقة دورك</h1>
+            <p className="text-xs text-ink-500">اقرأها بعناية — لا يراها أحد سواك</p>
           </div>
 
           {/* Case info */}
@@ -108,24 +94,22 @@ export default function RoleCardPage() {
 
           {/* Role card */}
           {card ? (
-            <RoleCardDisplay card={card} caseInfo={caseInfo} />
+            <RoleCardDisplay card={card} caseTitle={caseInfo?.title} caseInfo={caseInfo} />
           ) : (
             <Card className="text-center py-10">
-              <p className="text-ink-500 text-sm">لا توجد بطاقة لك — تأكد أن اللعبة بدأت</p>
-              <Button variant="ghost" size="sm" className="mt-4" onClick={() => setRetries(r => r + 1)}>
-                إعادة المحاولة
-              </Button>
+              <Spinner size={24} />
+              <p className="text-ink-500 text-sm mt-3 animate-pulse">جارٍ تحضير بطاقتك...</p>
             </Card>
           )}
 
-          {/* Actions based on status */}
-          {room?.status === 'starting' && (
+          {/* Actions */}
+          {room?.status === 'starting' ? (
             <div className="space-y-3">
               {isHost ? (
                 <>
-                  <div className="card-glass rounded-xl p-3 text-center">
-                    <p className="text-xs text-ink-400">
-                      {players.length} لاعبين في الغرفة — تأكد أن الجميع قرأ بطاقته
+                  <div className="text-center">
+                    <p className="text-xs text-ink-500 mb-1">
+                      {players.length} لاعبين في الغرفة
                     </p>
                   </div>
                   <Button
@@ -137,6 +121,9 @@ export default function RoleCardPage() {
                   >
                     {beginning ? 'جارٍ البدء...' : '🔨 ابدأ الجلسة الأولى'}
                   </Button>
+                  <p className="text-center text-xs text-ink-500">
+                    كمضيف، أنت من يبدأ الجلسة بعد أن يقرأ الجميع بطاقاتهم
+                  </p>
                 </>
               ) : (
                 <Card className="text-center py-5 space-y-2">
@@ -144,22 +131,20 @@ export default function RoleCardPage() {
                     <div className="w-8 h-8 rounded-full border-2 border-gold/30 border-t-gold animate-spin" />
                   </div>
                   <p className="text-ink-400 text-sm">المضيف سيبدأ الجلسة قريباً...</p>
-                  <p className="text-xs text-ink-600">ستنتقل الصفحة تلقائياً عند البدء</p>
+                  <p className="text-xs text-ink-600">ستنتقل الصفحة تلقائياً</p>
                 </Card>
               )}
             </div>
-          )}
-
-          {room?.status === 'in_session' && (
+          ) : room?.status === 'in_session' ? (
             <Button
               variant="primary"
               size="lg"
               className="w-full"
-              onClick={() => navigate(`/room/${roomId}/session`)}
+              onClick={handleGoToSession}
             >
               انتقل للجلسة ←
             </Button>
-          )}
+          ) : null}
 
         </div>
       </div>

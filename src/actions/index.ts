@@ -1,73 +1,55 @@
 import { supabase, callEdgeFunction } from '@/lib/supabase'
-import type { VerdictValue } from '@/lib/types'
+import type { ActiveRoomMembership, RoleCard, VerdictRow, VerdictValue } from '@/lib/types'
+import { SessionExpiredError, isSessionExpiredResult } from '@/lib/sessionEvent'
 
-async function getUser() {
-  const {
-    data: { user },
-    error,
-  } = await supabase.auth.getUser()
-  if (error || !user) throw new Error('يجب تسجيل الدخول أولاً')
-  return user
+type RoomRpcResponse = {
+  id: string
+  room_code: string
+  host_id: string
+  status: string
+  current_session: number
+  session_duration_seconds: number
+  max_players: number
+  created_at: string
+  updated_at: string
 }
 
+// ─── createRoom (atomic RPC) ─────────────────────
 export async function createRoom(opts: {
   maxPlayers?: number
   sessionDurationSeconds?: number
 }) {
-  const user = await getUser()
-
-  const { data: code, error: codeErr } = await supabase.rpc('generate_room_code')
-  if (codeErr) throw new Error('فشل توليد كود الغرفة: ' + codeErr.message)
-
-  const { data: room, error: roomErr } = await supabase
-    .from('game_rooms')
-    .insert({
-      room_code: code as string,
-      host_id: user.id,
-      max_players: opts.maxPlayers ?? 6,
-      session_duration_seconds: opts.sessionDurationSeconds ?? 180,
-    })
-    .select()
-    .single()
-
-  if (roomErr) throw new Error('فشل إنشاء الغرفة: ' + roomErr.message)
-
-  const { error: joinErr } = await supabase
-    .from('room_players')
-    .insert({ room_id: room.id, player_id: user.id, is_host: true, is_ready: false })
-
-  if (joinErr) throw new Error('فشل إضافة المضيف للغرفة: ' + joinErr.message)
-
-  return room
-}
-
-export async function joinRoom(roomCode: string) {
-  const user = await getUser()
-
-  const { data: roomData, error: fnErr } = await supabase.rpc('get_room_by_code', {
-    p_code: roomCode.toUpperCase().trim(),
+  const { data, error } = await supabase.rpc('create_room_with_host', {
+    p_max_players: opts.maxPlayers ?? 6,
+    p_session_duration_seconds: opts.sessionDurationSeconds ?? 180,
   })
 
-  if (fnErr) throw new Error('خطأ في البحث عن الغرفة: ' + fnErr.message)
-
-  const room = roomData?.[0]
-  if (!room) throw new Error('الغرفة غير موجودة — تحقق من الكود')
-  if (room.status !== 'waiting') throw new Error('اللعبة بدأت بالفعل في هذه الغرفة')
-  if (Number(room.current_count) >= room.max_players) throw new Error('الغرفة ممتلئة')
-
-  const { error: joinErr } = await supabase
-    .from('room_players')
-    .insert({ room_id: room.id, player_id: user.id, is_host: false, is_ready: false })
-
-  if (joinErr && joinErr.code !== '23505') {
-    throw new Error('فشل الانضمام: ' + joinErr.message)
+  if (error) throw new Error(error.message)
+  if (!data || typeof data !== 'object' || !('id' in data) || !data.id) {
+    throw new Error('لم يتم إنشاء الغرفة')
   }
 
-  return room
+  return data as RoomRpcResponse
 }
 
+// ─── joinRoom (atomic RPC) ───────────────────────
+export async function joinRoom(roomCode: string) {
+  const { data, error } = await supabase.rpc('join_room_by_code', {
+    p_room_code: roomCode.toUpperCase().trim(),
+  })
+
+  if (error) throw new Error(error.message)
+  if (!data || typeof data !== 'object' || !('id' in data) || !data.id) {
+    throw new Error('تعذر الانضمام إلى الغرفة')
+  }
+
+  return data as RoomRpcResponse
+}
+
+// ─── setReady ─────────────────────────────────────
 export async function setReady(roomId: string, ready: boolean) {
-  const user = await getUser()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
 
   const { error } = await supabase
     .from('room_players')
@@ -75,160 +57,158 @@ export async function setReady(roomId: string, ready: boolean) {
     .eq('room_id', roomId)
     .eq('player_id', user.id)
 
-  if (error) throw new Error('فشل تحديث الجاهزية: ' + error.message)
+  if (error) throw error
 }
 
-export async function startGame(roomId: string) {
-  return callEdgeFunction('start-game', { roomId })
+// ─── startGame → Edge Function ────────────────────
+export async function startGame(roomId: string, expectedStatus: 'waiting' | 'starting' = 'waiting') {
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  return callEdgeFunction<{
+    ok: boolean
+    case_title?: string
+    idempotent?: boolean
+    stale_request?: boolean
+    room_status?: string
+  }>('start-game', { roomId, requesterId: user.id, expectedStatus })
 }
 
-export async function beginSession(roomId: string) {
-  return callEdgeFunction('begin-session', { roomId })
+// ─── beginSession → Edge Function ─────────────────
+export async function beginSession(roomId: string, expectedStatus: 'starting' | 'in_session' = 'starting') {
+  return callEdgeFunction<{
+    ok: boolean
+    idempotent?: boolean
+    stale_request?: boolean
+    session_ends_at?: string
+    room_status?: string
+  }>('begin-session', { roomId, expectedStatus })
 }
 
-export async function advanceSession(
-  roomId: string,
-  opts?: { target?: 'next' | 'verdict'; expectedSession?: number }
-) {
-  return callEdgeFunction('advance-session', {
-    roomId,
-    target: opts?.target ?? 'next',
-    expectedSession: opts?.expectedSession,
-  })
+// ─── advanceSession → Edge Function ───────────────
+export async function advanceSession(roomId: string, expectedSession?: number, target: 'next' | 'verdict' = 'next') {
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  return callEdgeFunction('advance-session', { roomId, requesterId: user.id, expectedSession, target })
 }
 
+// ─── submitEvent ──────────────────────────────────
 export async function submitEvent(
   roomId: string,
   sessionNum: number,
   content: string,
   eventType: 'statement' | 'question' | 'objection' = 'statement',
+  sessionEndsAt?: string | null,
 ) {
-  const trimmed = content.trim()
-  if (!trimmed) throw new Error('لا يمكن إرسال رسالة فارغة')
-  if (trimmed.length > 500) throw new Error('الرسالة طويلة جداً')
+  const result = await callEdgeFunction<{
+    ok: boolean
+    code?: string
+    session_ends_at?: string | null
+    room_status?: string
+  }>('submit-event', { roomId, sessionNum, content, eventType, sessionEndsAt })
 
-  return callEdgeFunction('submit-event', {
-    roomId,
-    sessionNum,
-    eventType,
-    content: trimmed,
-  })
+  if (isSessionExpiredResult(result)) {
+    throw new SessionExpiredError()
+  }
+
+  return result
 }
 
-export async function submitVerdict(roomId: string, verdict: VerdictValue) {
-  return callEdgeFunction('submit-verdict', { roomId, verdict })
+// ─── submitVerdict → Edge Function ────────────────
+export async function submitVerdict(roomId: string, verdict: VerdictValue, expectedStatus: 'verdict' | 'finished' = 'verdict') {
+  return callEdgeFunction<{
+    ok: boolean
+    verdict: VerdictRow
+    idempotent?: boolean
+    stale_request?: boolean
+    results?: Array<{ player_id: string; role: string; did_win: boolean; reason: string }>
+  }>('submit-verdict', { roomId, verdict, expectedStatus })
 }
 
-export async function revealTruth(roomId: string) {
+// ─── revealTruth → Legacy Edge Function ───────────
+export async function revealTruth(roomId: string, expectedStatus: 'verdict' | 'reveal' | 'finished' = 'reveal') {
   return callEdgeFunction<{
     ok: boolean
     actual_verdict: string
     hidden_truth: string
-    results: Array<{
-      player_id: string
-      role: string
-      did_win: boolean
-      reason: string
-    }>
-  }>('reveal-truth', { roomId })
+    results: Array<{ player_id: string; role: string; did_win: boolean; reason: string }>
+    idempotent?: boolean
+    stale_request?: boolean
+  }>('reveal-truth', { roomId, expectedStatus })
 }
 
-export async function fetchMyRoleCard(roomId: string) {
-  const user = await getUser()
+// ─── fetchMyRoleCard ──────────────────────────────
+export async function fetchMyRoleCard(roomId: string): Promise<RoleCard | null> {
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return null
 
   const { data, error } = await supabase
     .from('player_role_data')
     .select('*')
     .eq('room_id', roomId)
     .eq('player_id', user.id)
-    .single()
+    .maybeSingle()
 
-  if (error && error.code !== 'PGRST116') {
-    console.error('[fetchMyRoleCard]', error.message)
-  }
-
-  return data
+  if (error) throw error
+  return (data as RoleCard | null) ?? null
 }
 
+// ─── fetchResults ─────────────────────────────────
 export async function fetchResults(roomId: string) {
   const { data, error } = await supabase
     .from('game_results')
     .select('*, profiles(username)')
     .eq('room_id', roomId)
+    .order('did_win', { ascending: false })
 
-  if (error) console.error('[fetchResults]', error.message)
+  if (error) throw error
   return data ?? []
 }
 
+// ─── fetchVerdictSummary ──────────────────────────
+export async function fetchVerdictSummary(roomId: string) {
+  const { data, error } = await supabase
+    .from('verdicts')
+    .select('*')
+    .eq('room_id', roomId)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as VerdictRow | null) ?? null
+}
+
+// ─── transferHost (atomic RPC) ────────────────────
 export async function transferHost(roomId: string, newHostPlayerId: string) {
-  const user = await getUser()
-
-  const { error: e1 } = await supabase
-    .from('room_players')
-    .update({ is_host: false })
-    .eq('room_id', roomId)
-    .eq('player_id', user.id)
-
-  if (e1) throw new Error('فشل تحديث المضيف: ' + e1.message)
-
-  const { error: e2 } = await supabase
-    .from('room_players')
-    .update({ is_host: true })
-    .eq('room_id', roomId)
-    .eq('player_id', newHostPlayerId)
-
-  if (e2) throw new Error('فشل تعيين المضيف الجديد: ' + e2.message)
-
-  const { error: e3 } = await supabase
-    .from('game_rooms')
-    .update({ host_id: newHostPlayerId })
-    .eq('id', roomId)
-
-  if (e3) throw new Error('فشل تحديث الغرفة: ' + e3.message)
-}
-
-export async function leaveRoom(roomId: string) {
-  const user = await getUser()
-
-  const { error } = await supabase
-    .from('room_players')
-    .delete()
-    .eq('room_id', roomId)
-    .eq('player_id', user.id)
-
-  if (error) throw new Error('فشل المغادرة: ' + error.message)
-}
-
-export async function playAgain(previousRoomId: string) {
-  const user = await getUser()
-
-  const { data: prev } = await supabase
-    .from('game_rooms')
-    .select('session_duration_seconds, max_players')
-    .eq('id', previousRoomId)
-    .single()
-
-  const { data: code } = await supabase.rpc('generate_room_code')
-
-  const { data: room, error } = await supabase
-    .from('game_rooms')
-    .insert({
-      room_code: code as string,
-      host_id: user.id,
-      max_players: prev?.max_players ?? 6,
-      session_duration_seconds: prev?.session_duration_seconds ?? 180,
-    })
-    .select()
-    .single()
-
-  if (error) throw new Error('فشل إنشاء الغرفة: ' + error.message)
-
-  await supabase.from('room_players').insert({
-    room_id: room.id,
-    player_id: user.id,
-    is_host: true,
-    is_ready: false,
+  const { data, error } = await supabase.rpc('transfer_room_host', {
+    p_room_id: roomId,
+    p_new_host_player_id: newHostPlayerId,
   })
 
-  return room
+  if (error) throw error
+  return data
+}
+
+
+// ─── fetchActiveRoomForCurrentUser ─────────────────
+export async function fetchActiveRoomForCurrentUser(): Promise<ActiveRoomMembership | null> {
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return null
+
+  const { data, error } = await supabase
+    .from('room_players')
+    .select(`
+      room_id,
+      is_host,
+      role,
+      game_rooms!inner(id, status, current_session, room_code)
+    `)
+    .eq('player_id', user.id)
+    .neq('game_rooms.status', 'finished')
+    .order('joined_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as ActiveRoomMembership | null) ?? null
 }

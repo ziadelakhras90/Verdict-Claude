@@ -1,115 +1,107 @@
 // supabase/functions/submit-event/index.ts
-// Submit a session event with server-side validation against room status, session and timer.
+// Guards event submission using room status, current session, and session_ends_at.
 // @ts-ignore deno imports
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
 
-type EventType = 'statement' | 'question' | 'objection'
+const MAX_EVENT_LENGTH = 300
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
   try {
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) {
-      return new Response(JSON.stringify({ ok: false, error: 'Missing Authorization header' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    if (!authHeader) throw new Error('Missing authorization header')
 
-    const userClient = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!, {
-      global: { headers: { Authorization: authHeader } },
-    })
-    const {
-      data: { user },
-      error: authErr,
-    } = await userClient.auth.getUser()
-    if (authErr || !user) {
-      return new Response(JSON.stringify({ ok: false, error: 'Unauthorized' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    const userClient = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_ANON_KEY')!,
+      { global: { headers: { Authorization: authHeader } } }
+    )
+    const { data: { user }, error: authErr } = await userClient.auth.getUser()
+    if (authErr || !user) throw new Error('Unauthorized')
 
-    const body = await req.json().catch(() => ({}))
-    const { roomId, sessionNum, eventType, content } = body as {
-      roomId?: string
-      sessionNum?: number
-      eventType?: EventType
-      content?: string
-    }
+    const { roomId, sessionNum, content, eventType = 'statement', sessionEndsAt } = await req.json()
 
     if (!roomId) throw new Error('roomId is required')
-    if (!sessionNum) throw new Error('sessionNum is required')
-    if (!eventType || !['statement', 'question', 'objection'].includes(eventType)) {
-      throw new Error('نوع المداخلة غير صالح')
-    }
+    if (!sessionNum || typeof sessionNum !== 'number') throw new Error('sessionNum is required')
+    if (!['statement', 'question', 'objection'].includes(eventType)) throw new Error('invalid event type')
 
-    const trimmed = content?.trim() ?? ''
-    if (!trimmed) throw new Error('لا يمكن إرسال رسالة فارغة')
-    if (trimmed.length > 500) throw new Error('الرسالة طويلة جداً')
+    const trimmedContent = typeof content === 'string' ? content.trim() : ''
+    if (!trimmedContent) throw new Error('content is required')
+    if (trimmedContent.length > MAX_EVENT_LENGTH) throw new Error('content exceeds limit')
 
-    const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+    const admin = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    )
+
+    const { data: membership, error: membershipErr } = await admin
+      .from('room_players')
+      .select('role')
+      .eq('room_id', roomId)
+      .eq('player_id', user.id)
+      .maybeSingle()
+
+    if (membershipErr) throw membershipErr
+    if (!membership) throw new Error('Not a room member')
+    if (membership.role === 'judge') throw new Error('Judge cannot submit session events')
 
     const { data: room, error: roomErr } = await admin
       .from('game_rooms')
-      .select('id, status, current_session, session_ends_at')
+      .select('status, current_session, session_ends_at')
       .eq('id', roomId)
       .single()
 
     if (roomErr || !room) throw new Error('Room not found')
 
-    const { data: player, error: playerErr } = await admin
-      .from('room_players')
-      .select('role')
-      .eq('room_id', roomId)
-      .eq('player_id', user.id)
-      .single()
+    const endsAt = room.session_ends_at ? new Date(room.session_ends_at).getTime() : null
+    const clientEndsAt = typeof sessionEndsAt === 'string' ? Date.parse(sessionEndsAt) : null
+    const now = Date.now()
 
-    if (playerErr || !player) throw new Error('أنت لست داخل هذه الغرفة')
-    if (player.role === 'judge') throw new Error('القاضي لا يرسل مداخلات من شاشة اللاعبين')
+    const closed = (
+      room.status !== 'in_session' ||
+      room.current_session !== sessionNum ||
+      !endsAt ||
+      endsAt <= now ||
+      (clientEndsAt != null && Number.isFinite(clientEndsAt) && clientEndsAt !== endsAt)
+    )
 
-    if (room.status !== 'in_session') {
-      return new Response(JSON.stringify({ ok: false, error: 'انتهت الجلسة الحالية', session_expired: true }), {
-        status: 409,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+    if (closed) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          code: 'session_expired',
+          session_ends_at: room.session_ends_at,
+          room_status: room.status,
+          current_session: room.current_session,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
     }
 
-    if (room.current_session !== sessionNum) {
-      return new Response(JSON.stringify({ ok: false, error: 'انتقلت الغرفة إلى جلسة أخرى بالفعل', session_expired: true }), {
-        status: 409,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    const { error: insertErr } = await admin
+      .from('game_events')
+      .insert({
+        room_id: roomId,
+        player_id: user.id,
+        event_type: eventType,
+        session_num: sessionNum,
+        content: trimmedContent,
       })
-    }
 
-    if (!room.session_ends_at || new Date(room.session_ends_at).getTime() <= Date.now()) {
-      return new Response(JSON.stringify({ ok: false, error: 'انتهى وقت الجلسة', session_expired: true }), {
-        status: 409,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    if (insertErr) throw insertErr
 
-    const { error: insertErr } = await admin.from('game_events').insert({
-      room_id: roomId,
-      player_id: user.id,
-      event_type: eventType,
-      session_num: sessionNum,
-      content: trimmed,
-    })
-
-    if (insertErr) throw new Error('فشل إرسال الرسالة: ' + insertErr.message)
-
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    return new Response(
+      JSON.stringify({ ok: true }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error('[submit-event] error:', msg)
-    return new Response(JSON.stringify({ ok: false, error: msg }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    console.error('[submit-event]', msg)
+    return new Response(
+      JSON.stringify({ ok: false, error: msg }),
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    )
   }
 })

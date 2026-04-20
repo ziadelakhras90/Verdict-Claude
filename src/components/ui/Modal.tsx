@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react'
+import type { MouseEvent } from 'react'
 import { cn } from '@/lib/utils'
 
 interface ModalProps {
@@ -36,7 +37,7 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
           'animate-fade-up',
           widths[size]
         )}
-        onClick={e => e.stopPropagation()}
+        onClick={(e: MouseEvent<HTMLDivElement>) => e.stopPropagation()}
       >
         {title && (
           <div className="flex items-center justify-between mb-5">

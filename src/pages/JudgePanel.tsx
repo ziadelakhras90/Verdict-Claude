@@ -1,135 +1,155 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { useRoom } from '@/hooks/useRoom'
+import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { useRoomStore } from '@/stores/roomStore'
+import { useRoomGuard } from '@/hooks/useRoomGuard'
+import { useToast } from '@/hooks/useToast'
+import { useSessionTimer } from '@/hooks/useSessionTimer'
 import { advanceSession, submitVerdict } from '@/actions'
 import { AppShell } from '@/components/layout'
-import { CaseInfoPanel } from '@/components/game/CaseInfoPanel'
+import { Button, Card } from '@/components/ui'
+import { ToastContainer } from '@/components/ui/ToastContainer'
 import { CountdownRing } from '@/components/game/CountdownRing'
 import { EventFeed } from '@/components/game/EventFeed'
-import { GamePhaseBar } from '@/components/game/GamePhaseBar'
-import { ConnectionLostOverlay } from '@/components/ui/ConnectionLostOverlay'
+import { CaseInfoPanel } from '@/components/game/CaseInfoPanel'
 import { Modal } from '@/components/ui/Modal'
-import { ToastContainer } from '@/components/ui/ToastContainer'
-import { Button, Card } from '@/components/ui'
-import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { useRoom } from '@/hooks/useRoom'
-import { useRoomGuard } from '@/hooks/useRoomGuard'
-import { useSessionTimer } from '@/hooks/useSessionTimer'
-import { useToast } from '@/hooks/useToast'
-import { ROLE_LABELS, SESSION_LABELS } from '@/lib/types'
-import type { Role, VerdictValue } from '@/lib/types'
-import { cn } from '@/lib/utils'
-import { useRoomStore } from '@/stores/roomStore'
+import { SESSION_LABELS } from '@/lib/types'
+import type { VerdictValue } from '@/lib/types'
+import { cn, normalizeErrorMessage } from '@/lib/utils'
+import { getEdgeMutationFeedback } from '@/lib/edgeMutation'
+
+type AdvanceTarget = 'next' | 'verdict'
 
 export default function JudgePanel() {
   const { id: roomId } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const currentUserId = useCurrentUser()
   const toast = useToast()
-  useRoom(roomId)
-  useRoomGuard(roomId, ['in_session', 'verdict'])
+  const { fetchAll } = useRoom(roomId)
+  useRoomGuard(roomId, ['in_session', 'verdict'], 'judge')
 
-  const room = useRoomStore((s) => s.room)
-  const players = useRoomStore((s) => s.players)
-  const events = useRoomStore((s) => s.events)
-  const caseInfo = useRoomStore((s) => s.caseInfo)
-  const { isExpired } = useSessionTimer()
+  const room = useRoomStore(s => s.room)
+  const players = useRoomStore(s => s.players)
+  const events = useRoomStore(s => s.events)
+  const caseInfo = useRoomStore(s => s.caseInfo)
+  const { isExpired, secondsLeft } = useSessionTimer()
 
   const [advancing, setAdvancing] = useState(false)
   const [showVerdict, setShowVerdict] = useState(false)
-  const [showSkipConfirm, setShowSkipConfirm] = useState(false)
   const [selectedV, setSelectedV] = useState<VerdictValue | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [showForceVerdictConfirm, setShowForceVerdictConfirm] = useState(false)
 
-  const me = players.find((p) => p.player_id === currentUserId)
+  const me = useMemo(
+    () => players.find((p) => p.player_id === currentUserId),
+    [players, currentUserId]
+  )
   const isJudge = me?.role === 'judge'
-  const autoAdvancedRef = useRef(false)
+  const lastHandledExpiredSessionRef = useRef<number | null>(null)
 
   useEffect(() => {
-    if (me && !isJudge) {
+    if (me?.role && me.role !== 'judge') {
       navigate(`/room/${roomId}/session`, { replace: true })
     }
-  }, [me, isJudge, navigate, roomId])
+  }, [me?.role, navigate, roomId])
+
+  useEffect(() => {
+    if (!room) return
+    if (room.status !== 'in_session' || secondsLeft > 0) {
+      lastHandledExpiredSessionRef.current = null
+    }
+  }, [room?.status, room?.current_session, secondsLeft])
 
   useEffect(() => {
     if (room?.status === 'verdict' && isJudge) setShowVerdict(true)
+    if (room?.status !== 'verdict') {
+      setShowVerdict(false)
+      setSelectedV(null)
+    }
   }, [room?.status, isJudge])
 
   useEffect(() => {
-    autoAdvancedRef.current = false
-  }, [room?.current_session])
+    const currentSession = room?.current_session
+    if (!roomId || !room || !isJudge || !isExpired || room.status !== 'in_session' || advancing) return
+    if (currentSession == null) return
+    if (lastHandledExpiredSessionRef.current === currentSession) return
 
-  const handleAdvance = useCallback(
-    async (target: 'next' | 'verdict' = 'next') => {
-      if (!roomId || !room || advancing) return
-      setAdvancing(true)
-      try {
-        const result = (await advanceSession(roomId, {
-          target,
-          expectedSession: room.current_session,
-        })) as { ok: boolean; next?: string | number; idempotent?: boolean; stale_request?: boolean }
+    lastHandledExpiredSessionRef.current = currentSession
+    void handleAdvance('next', currentSession, true)
+  }, [isExpired, isJudge, roomId, room?.status, room?.current_session, advancing])
 
-        if (result.stale_request || result.idempotent) return
+  async function handleAdvance(target: AdvanceTarget, expectedSession?: number, autoTriggered = false) {
+    if (!roomId || advancing || room?.status !== 'in_session') return
 
-        if (result.next === 'verdict') {
-          toast.info('تم إنهاء الجلسات والانتقال إلى مرحلة الحكم')
-        } else if (typeof result.next === 'number') {
-          toast.success(`بدأت الجلسة ${result.next}`)
-        }
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'فشل الانتقال للمرحلة التالية')
-      } finally {
-        setAdvancing(false)
+    const sessionSnapshot = expectedSession ?? room.current_session
+    if (!sessionSnapshot) return
+
+    setAdvancing(true)
+    try {
+      const result = await advanceSession(roomId, sessionSnapshot, target) as {
+        idempotent?: boolean
+        stale_request?: boolean
+        moved_to?: string
+        message?: string
       }
-    },
-    [advancing, room, roomId, toast],
-  )
+      await fetchAll()
 
-  useEffect(() => {
-    if (!isExpired || !isJudge || room?.status !== 'in_session' || advancing || autoAdvancedRef.current) return
-    autoAdvancedRef.current = true
-    void handleAdvance('next')
-  }, [advancing, handleAdvance, isExpired, isJudge, room?.status])
+      const feedback = getEdgeMutationFeedback('advance-session', result)
+      if (feedback.isDuplicate) {
+        if (autoTriggered) toast[feedback.variant](feedback.message)
+        return
+      }
+
+      if (target === 'verdict' || result?.moved_to === 'verdict') {
+        toast.info(target === 'verdict' ? 'تم إنهاء الجلسات والانتقال مباشرة إلى الحكم' : 'انتهت الجلسات — أصدر حكمك')
+        setShowForceVerdictConfirm(false)
+      } else {
+        toast.success(`تم إنهاء الجلسة الحالية والانتقال إلى الجلسة ${sessionSnapshot + 1}`)
+      }
+    } catch (err) {
+      if (autoTriggered) {
+        lastHandledExpiredSessionRef.current = null
+      }
+      toast.error(normalizeErrorMessage(err, target === 'verdict' ? 'تعذر الانتقال إلى الحكم' : 'تعذر الانتقال للجلسة التالية'))
+    } finally {
+      setAdvancing(false)
+    }
+  }
 
   async function handleVerdictSubmit() {
-    if (!roomId || !selectedV || submitting) return
+    if (!roomId || !selectedV || submitting || room?.status !== 'verdict') return
     setSubmitting(true)
     try {
-      await submitVerdict(roomId, selectedV)
+      const result = await submitVerdict(roomId, selectedV, 'verdict')
       setShowVerdict(false)
-      toast.success('صدر الحكم بنجاح')
+      const baseFeedback = getEdgeMutationFeedback('submit-verdict', result)
+      const feedback = getEdgeMutationFeedback('submit-verdict', result, {
+        message: baseFeedback.isDuplicate ? 'تم حفظ الحكم بالفعل' : 'صدر الحكم',
+      })
+      toast[feedback.variant](feedback.message)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'فشل إصدار الحكم')
+      toast.error(normalizeErrorMessage(err, 'فشل إصدار الحكم'))
+    } finally {
       setSubmitting(false)
     }
   }
 
   const currentSession = room?.current_session ?? 1
   const sessionDuration = room?.session_duration_seconds ?? 180
-
+  const isLastSession = currentSession >= 3
+  const canAdvance = room?.status === 'in_session'
   const sessionEvents = useMemo(
-    () => events.filter((e) => e.session_num === currentSession && e.event_type !== 'system'),
-    [currentSession, events],
+    () => events.filter((event) => event.session_num === currentSession && event.event_type !== 'system'),
+    [events, currentSession]
   )
-
-  const speakerCounts = useMemo(() => {
-    const counts = new Map<string, number>()
+  const speakerMap = useMemo(() => {
+    const map = new Map<string, number>()
     sessionEvents.forEach((event) => {
       const username = event.profiles?.username ?? '?'
-      counts.set(username, (counts.get(username) ?? 0) + 1)
+      map.set(username, (map.get(username) ?? 0) + 1)
     })
-    return counts
-  }, [sessionEvents])
-
-  const currentSessionSummary = useMemo(() => {
-    return sessionEvents.reduce(
-      (acc, event) => {
-        if (event.event_type === 'statement' || event.event_type === 'question' || event.event_type === 'objection') {
-          acc[event.event_type] += 1
-        }
-        return acc
-      },
-      { statement: 0, question: 0, objection: 0 },
-    )
+    return map
   }, [sessionEvents])
 
   if (!room) return null
@@ -137,17 +157,16 @@ export default function JudgePanel() {
   return (
     <AppShell>
       <div className="h-screen flex flex-col max-w-2xl mx-auto">
-        <GamePhaseBar />
-
         <div className="flex items-center gap-4 px-5 py-4 border-b border-gold/20 bg-judge/10">
           <div className="flex-1">
             <div className="flex items-center gap-2 mb-0.5">
               <span className="text-xl">⚖️</span>
-              <span className="label-sm text-gold/70">لوحة القاضي</span>
+              <span className="label-sm">لوحة القاضي</span>
             </div>
             <p className="font-display text-lg text-gold leading-tight">
               {SESSION_LABELS[currentSession] ?? `الجلسة ${currentSession}`}
             </p>
+            <p className="text-xs text-ink-500 mt-1">يمكنك إنهاء الجلسة الحالية قبل انتهاء المؤقت أو نقل الجميع مباشرة إلى مرحلة الحكم.</p>
           </div>
           <CountdownRing totalSeconds={sessionDuration} size={80} />
         </div>
@@ -158,38 +177,27 @@ export default function JudgePanel() {
           </div>
         )}
 
-        <div className="px-4 py-2 border-b border-ink-800/40 flex gap-2 flex-wrap min-h-[36px]">
-          {players.map((p) => {
-            const name = p.profiles?.username ?? '?'
-            const count = speakerCounts.get(name) ?? 0
+        <div className="px-4 py-2 border-b border-ink-800/40 flex gap-2 flex-wrap">
+          {players.map((player) => {
+            const name = player.profiles?.username ?? '?'
+            const count = speakerMap.get(name) ?? 0
             return (
               <div
-                key={p.player_id}
+                key={player.player_id}
                 className={cn(
                   'flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs',
-                  p.role === 'judge' ? 'border-gold/50 bg-gold/10 text-gold' : 'border-ink-700 text-ink-400',
+                  player.role === 'judge'
+                    ? 'border-gold/50 bg-gold/10 text-gold'
+                    : 'border-ink-700 text-ink-400'
                 )}
               >
                 <span>{name}</span>
-                {p.role && p.role !== 'judge' && (
-                  <span className="text-ink-600 text-[10px]">{ROLE_LABELS[p.role as Role].slice(0, 5)}</span>
+                {count > 0 && (
+                  <span className="bg-gold/20 text-gold px-1 rounded-full">{count}</span>
                 )}
-                {count > 0 && <span className="bg-gold/20 text-gold px-1 rounded-full">{count}</span>}
               </div>
             )
           })}
-        </div>
-
-        <div className="px-4 py-2 border-b border-ink-800/40 flex gap-2 flex-wrap text-xs">
-          <span className="rounded-full border border-gold/30 bg-gold/10 px-2.5 py-1 text-gold">
-            إفادات: {currentSessionSummary.statement}
-          </span>
-          <span className="rounded-full border border-blue-500/30 bg-blue-900/20 px-2.5 py-1 text-blue-300">
-            أسئلة: {currentSessionSummary.question}
-          </span>
-          <span className="rounded-full border border-blood/30 bg-blood/10 px-2.5 py-1 text-blood-300">
-            اعتراضات: {currentSessionSummary.objection}
-          </span>
         </div>
 
         <div className="flex-1 overflow-hidden flex flex-col">
@@ -197,25 +205,44 @@ export default function JudgePanel() {
         </div>
 
         <div className="border-t border-gold/20 p-4 space-y-3 bg-judge/5">
-          {room.status === 'in_session' && (
+          <p className="label-sm text-center text-gold/60">أدوات القاضي</p>
+
+          {canAdvance && (
             <>
-              <div className="grid gap-3 md:grid-cols-2">
-                <Button variant="judge" size="lg" loading={advancing} onClick={() => void handleAdvance('next')} className="w-full">
-                  {currentSession >= 3 ? '⚖️ إنهاء الجلسات والانتقال للحكم' : `← الانتقال للجلسة ${currentSession + 1}`}
-                </Button>
+              <Card className="border-gold/10 bg-ink-900/40 p-3">
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <div>
+                    <p className="text-parch-200">{isExpired ? 'انتهى وقت الجلسة الحالية' : 'يمكنك إنهاء الجلسة الحالية مبكرًا'}</p>
+                    <p className="text-xs text-ink-500 mt-1">
+                      {isLastSession ? 'هذه آخر جلسة قبل مرحلة الحكم.' : `سينتقل الجميع إلى الجلسة ${currentSession + 1} فورًا عند الضغط.`}
+                    </p>
+                  </div>
+                  {isExpired ? <span className="text-gold text-xs">تلقائي</span> : <span className="text-gold text-xs">يدوي</span>}
+                </div>
+              </Card>
+
+              <Button
+                variant="judge"
+                size="lg"
+                loading={advancing}
+                disabled={advancing}
+                onClick={() => void handleAdvance('next')}
+                className="w-full"
+              >
+                {isLastSession ? '⚖️ إنهاء الجلسة الحالية والانتقال للحكم' : `⏭️ إنهاء الجلسة الحالية والانتقال إلى الجلسة ${currentSession + 1}`}
+              </Button>
+
+              {!isLastSession && (
                 <Button
                   variant="ghost"
-                  size="lg"
+                  size="md"
                   disabled={advancing}
-                  onClick={() => setShowSkipConfirm(true)}
-                  className="w-full border-judge-500/40 text-judge-200 hover:bg-judge/10"
+                  onClick={() => setShowForceVerdictConfirm(true)}
+                  className="w-full"
                 >
-                  ⏭️ الانتقال مباشرة إلى مرحلة الحكم
+                  ⏩ الانتقال مباشرة إلى مرحلة الحكم
                 </Button>
-              </div>
-              <Card className="py-3 text-center text-sm text-ink-400">
-                يمكنك إنهاء الجلسة الحالية يدويًا في أي وقت، أو القفز مباشرة للحكم إذا اكتملت الصورة لديك.
-              </Card>
+              )}
             </>
           )}
 
@@ -227,25 +254,17 @@ export default function JudgePanel() {
         </div>
       </div>
 
-      <Modal open={showSkipConfirm} onClose={() => !advancing && setShowSkipConfirm(false)} title="إنهاء الجلسات الآن" size="sm">
-        <div className="space-y-4 text-right">
-          <p className="text-sm text-parch-200 leading-relaxed">
-            هل تريد إنهاء ما تبقى من الجلسات والانتقال مباشرة إلى مرحلة الحكم؟ استخدم هذا الخيار فقط إذا أصبحت الصورة واضحة لديك.
+      <Modal open={showForceVerdictConfirm} onClose={() => !advancing && setShowForceVerdictConfirm(false)} title="الانتقال إلى الحكم" size="sm">
+        <div className="space-y-5">
+          <p className="text-sm text-parch-200 leading-7">
+            سيتم إنهاء الجلسات الحالية فورًا والانتقال إلى مرحلة الحكم بدون انتظار انتهاء المؤقت أو إكمال الجلسات الثلاث.
           </p>
-          <div className="flex gap-2">
-            <Button variant="ghost" className="flex-1" onClick={() => setShowSkipConfirm(false)} disabled={advancing}>
+          <div className="flex gap-3">
+            <Button variant="ghost" className="flex-1" onClick={() => setShowForceVerdictConfirm(false)}>
               إلغاء
             </Button>
-            <Button
-              variant="judge"
-              className="flex-1"
-              loading={advancing}
-              onClick={async () => {
-                setShowSkipConfirm(false)
-                await handleAdvance('verdict')
-              }}
-            >
-              الانتقال للحكم
+            <Button variant="judge" className="flex-1" loading={advancing} onClick={() => void handleAdvance('verdict')}>
+              نعم، إلى الحكم
             </Button>
           </div>
         </div>
@@ -253,29 +272,27 @@ export default function JudgePanel() {
 
       <Modal open={showVerdict} onClose={() => !submitting && setShowVerdict(false)} title="الحكم النهائي" size="sm">
         <div className="space-y-5">
-          <p className="text-sm text-ink-400 text-center">استمعتَ لجميع الأطراف — أصدر حكمك النهائي</p>
+          <p className="text-sm text-ink-400 text-center">
+            استمعتَ لجميع الأطراف — أصدر حكمك النهائي
+          </p>
           <div className="grid grid-cols-2 gap-3">
-            {(['innocent', 'guilty'] as VerdictValue[]).map((v) => (
+            {(['innocent', 'guilty'] as VerdictValue[]).map((value) => (
               <button
-                key={v}
-                onClick={() => setSelectedV(v)}
+                key={value}
+                onClick={() => setSelectedV(value)}
                 className={cn(
                   'p-5 rounded-xl border-2 text-center transition-all duration-150 active:scale-95',
-                  selectedV === v
-                    ? v === 'innocent'
-                      ? 'border-blue-400 bg-blue-900/30'
-                      : 'border-blood bg-blood/20'
-                    : 'border-ink-700 hover:border-ink-500',
+                  selectedV === value
+                    ? value === 'innocent' ? 'border-blue-400 bg-blue-900/30' : 'border-blood bg-blood/20'
+                    : 'border-ink-700 hover:border-ink-500'
                 )}
               >
-                <div className="text-3xl mb-1.5">{v === 'innocent' ? '🕊️' : '⛓️'}</div>
-                <p
-                  className={cn(
-                    'font-display text-lg',
-                    selectedV === v ? (v === 'innocent' ? 'text-blue-300' : 'text-blood-300') : 'text-parch-300',
-                  )}
-                >
-                  {v === 'innocent' ? 'بريء' : 'مذنب'}
+                <div className="text-3xl mb-1.5">{value === 'innocent' ? '🕊️' : '⛓️'}</div>
+                <p className={cn(
+                  'font-display text-lg',
+                  selectedV === value ? (value === 'innocent' ? 'text-blue-300' : 'text-blood-300') : 'text-parch-300'
+                )}>
+                  {value === 'innocent' ? 'بريء' : 'مذنب'}
                 </p>
               </button>
             ))}
@@ -293,7 +310,6 @@ export default function JudgePanel() {
         </div>
       </Modal>
 
-      <ConnectionLostOverlay />
       <ToastContainer />
     </AppShell>
   )

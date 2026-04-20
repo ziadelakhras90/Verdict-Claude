@@ -1,173 +1,173 @@
 import { useEffect, useCallback, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
+import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js'
 import { useRoomStore } from '@/stores/roomStore'
+import type { RoomStore } from '@/stores/roomStore'
 import type { GameRoom, RoomPlayer, GameEvent, PublicCaseInfo } from '@/lib/types'
+import {
+  attachEventProfile,
+  buildPlayerPresenceUpdate,
+  shouldClearCaseInfo,
+  shouldFallbackRefetchForDeletedPlayer,
+  shouldIgnoreStaleFetch,
+  shouldRefreshCaseInfoForRoomUpdate,
+} from '@/lib/roomSync'
 
-/**
- * Subscribes to realtime updates for a room.
- * Fetches initial data and keeps state synchronized.
- *
- * NOTE: Does NOT reset the store on unmount — the store persists while
- * navigating between game pages for the same room. Call store.reset()
- * explicitly when leaving a room entirely.
- */
+const POLL_INTERVAL_MS = 2500
+
+type RealtimeSubscribeStatus = 'SUBSCRIBED' | 'TIMED_OUT' | 'CLOSED' | 'CHANNEL_ERROR'
+
 export function useRoom(roomId: string | undefined) {
   const {
-    room: existingRoom,
+    scopeToRoom,
     setRoom, updateRoom,
-    setPlayers, upsertPlayer, updatePlayer,
+    setPlayers, upsertPlayer, updatePlayer, removePlayer,
     addEvent, setEvents,
     setCaseInfo,
     setConnected,
   } = useRoomStore()
 
-  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+  const fetchSeqRef = useRef(0)
 
-  const fetchAll = useCallback(async (forceRefresh = false) => {
+  const fetchAll = useCallback(async () => {
     if (!roomId) return
 
-    // Don't re-fetch if we already have data and not forcing
-    const needsRefresh = forceRefresh || !existingRoom || existingRoom.id !== roomId
+    const seq = ++fetchSeqRef.current
 
     const [roomRes, playersRes, eventsRes] = await Promise.all([
       supabase.from('game_rooms').select('*').eq('id', roomId).single(),
       supabase.from('room_players')
         .select('*, profiles(username, avatar_url)')
+        .eq('room_id', roomId),
+      supabase.from('game_events')
+        .select('*, profiles(username)')
         .eq('room_id', roomId)
-        .order('joined_at', { ascending: true }),
-      needsRefresh
-        ? supabase.from('game_events')
-            .select('*, profiles(username)')
-            .eq('room_id', roomId)
-            .order('created_at', { ascending: true })
-        : Promise.resolve({ data: null }),
+        .order('created_at', { ascending: true }),
     ])
 
+    if (shouldIgnoreStaleFetch(seq, fetchSeqRef.current)) return
+
     if (roomRes.data) {
-      setRoom(roomRes.data as GameRoom)
-      // Fetch case info if available
-      if (roomRes.data.case_id) {
-        supabase
+      const roomData = roomRes.data as GameRoom
+      setRoom(roomData)
+
+      if (roomData.case_id) {
+        const { data: caseData } = await supabase
           .from('public_case_info')
           .select('*')
-          .eq('id', roomRes.data.case_id)
+          .eq('id', roomData.case_id)
           .single()
-          .then(({ data }) => { if (data) setCaseInfo(data as PublicCaseInfo) })
+
+        if (shouldIgnoreStaleFetch(seq, fetchSeqRef.current)) return
+        if (caseData) setCaseInfo(caseData as PublicCaseInfo)
+      } else {
+        setCaseInfo(null)
       }
     }
 
     if (playersRes.data) setPlayers(playersRes.data as RoomPlayer[])
-    if (eventsRes.data)  setEvents(eventsRes.data as GameEvent[])
-  }, [roomId])
+    if (eventsRes.data) setEvents(eventsRes.data as GameEvent[])
+  }, [roomId, setRoom, setPlayers, setEvents, setCaseInfo])
 
   useEffect(() => {
     if (!roomId) return
 
-    // Initial data fetch
-    fetchAll(true)
+    scopeToRoom(roomId)
+    void fetchAll()
 
-    // Remove any existing channel for this room
-    if (channelRef.current) {
-      supabase.removeChannel(channelRef.current)
-    }
+    const channel: RealtimeChannel = supabase
+      .channel(`room:${roomId}`)
 
-    const channel = supabase
-      .channel(`room-${roomId}`, {
-        config: { broadcast: { self: true } },
-      })
-
-      // Room status / session changes
       .on('postgres_changes', {
-        event:  'UPDATE',
-        schema: 'public',
-        table:  'game_rooms',
+        event: 'UPDATE', schema: 'public', table: 'game_rooms',
         filter: `id=eq.${roomId}`,
-      }, async ({ new: updated }) => {
+      }, async (payload: RealtimePostgresChangesPayload<GameRoom>) => {
+        const updated = payload.new
         updateRoom(updated as Partial<GameRoom>)
-        const u = updated as Partial<GameRoom>
-        if (u.case_id) {
-          const { data } = await supabase
-            .from('public_case_info').select('*').eq('id', u.case_id).single()
-          if (data) setCaseInfo(data as PublicCaseInfo)
+        const roomUpdate = updated as Partial<GameRoom>
+
+        if (shouldRefreshCaseInfoForRoomUpdate(roomUpdate, (useRoomStore.getState() as RoomStore).caseInfo)) {
+          const { data: caseData } = await supabase
+            .from('public_case_info').select('*').eq('id', roomUpdate.case_id).single()
+          if (caseData) setCaseInfo(caseData as PublicCaseInfo)
+        } else if (shouldClearCaseInfo(roomUpdate.case_id)) {
+          setCaseInfo(null)
         }
       })
 
-      // New player joining
       .on('postgres_changes', {
-        event:  'INSERT',
-        schema: 'public',
-        table:  'room_players',
+        event: 'INSERT', schema: 'public', table: 'room_players',
         filter: `room_id=eq.${roomId}`,
-      }, async ({ new: player }) => {
+      }, async (payload: RealtimePostgresChangesPayload<RoomPlayer>) => {
+        const player = payload.new
+        const basePlayer = player as RoomPlayer
         const { data: profile } = await supabase
-          .from('profiles')
-          .select('username, avatar_url')
-          .eq('id', (player as RoomPlayer).player_id)
-          .single()
-        upsertPlayer({ ...(player as RoomPlayer), profiles: profile ?? undefined })
+          .from('profiles').select('username, avatar_url')
+          .eq('id', basePlayer.player_id).single()
+
+        upsertPlayer({ ...basePlayer, profiles: profile ?? undefined })
       })
 
-      // Player update (ready, role, etc.)
       .on('postgres_changes', {
-        event:  'UPDATE',
-        schema: 'public',
-        table:  'room_players',
+        event: 'UPDATE', schema: 'public', table: 'room_players',
         filter: `room_id=eq.${roomId}`,
-      }, ({ new: updated }) => {
+      }, (payload: RealtimePostgresChangesPayload<RoomPlayer>) => {
+        const updated = payload.new
         const p = updated as RoomPlayer
-        updatePlayer(p.player_id, {
-          is_ready: p.is_ready,
-          role:     p.role,
-          is_host:  p.is_host,
-        })
+        updatePlayer(p.player_id, buildPlayerPresenceUpdate(p))
       })
 
-      // Player leaving
       .on('postgres_changes', {
-        event:  'DELETE',
-        schema: 'public',
-        table:  'room_players',
+        event: 'DELETE', schema: 'public', table: 'room_players',
         filter: `room_id=eq.${roomId}`,
-      }, ({ old }) => {
-        const p = old as { player_id: string }
-        useRoomStore.getState().removePlayer(p.player_id)
+      }, (payload: RealtimePostgresChangesPayload<RoomPlayer>) => {
+        const old = payload.old
+        const deleted = old as Partial<RoomPlayer>
+        if (shouldFallbackRefetchForDeletedPlayer(deleted)) void fetchAll()
+        else removePlayer(deleted.player_id as string)
       })
 
-      // New game event
       .on('postgres_changes', {
-        event:  'INSERT',
-        schema: 'public',
-        table:  'game_events',
+        event: 'INSERT', schema: 'public', table: 'game_events',
         filter: `room_id=eq.${roomId}`,
-      }, async ({ new: event }) => {
+      }, async (payload: RealtimePostgresChangesPayload<GameEvent>) => {
+        const event = payload.new
         const ev = event as GameEvent
         if (ev.player_id) {
           const { data: profile } = await supabase
             .from('profiles').select('username').eq('id', ev.player_id).single()
-          addEvent({ ...ev, profiles: profile ?? undefined })
-        } else {
-          addEvent(ev)
+          addEvent(attachEventProfile(ev, profile?.username))
+          return
         }
+
+        addEvent(ev)
       })
 
-      .subscribe(status => {
+      .subscribe((status: RealtimeSubscribeStatus) => {
         setConnected(status === 'SUBSCRIBED')
-        if (status === 'CHANNEL_ERROR') {
-          console.warn('[useRoom] channel error — retrying...')
-          setTimeout(() => fetchAll(true), 2000)
-        }
       })
 
-    channelRef.current = channel
+    const pollId = window.setInterval(() => {
+      void fetchAll()
+    }, POLL_INTERVAL_MS)
+
+    const onFocus = () => { void fetchAll() }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchAll()
+    }
+
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
 
     return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
-      }
+      fetchSeqRef.current += 1
+      window.clearInterval(pollId)
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
       setConnected(false)
+      supabase.removeChannel(channel)
     }
-  }, [roomId])
+  }, [roomId, scopeToRoom, fetchAll, updateRoom, upsertPlayer, updatePlayer, removePlayer, addEvent, setCaseInfo, setConnected])
 
   return { fetchAll }
 }

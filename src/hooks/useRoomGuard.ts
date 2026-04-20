@@ -1,42 +1,45 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAuthStore } from '@/stores/authStore'
 import { useRoomStore } from '@/stores/roomStore'
+import type { RoomStore } from '@/stores/roomStore'
+import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { shouldRedirectToCanonicalRoomPage } from '@/lib/gameFlow'
 import type { RoomStatus } from '@/lib/types'
 
-const STATUS_ROUTES: Record<RoomStatus, string> = {
-  waiting: 'lobby',
-  starting: 'card',
-  in_session: 'session',
-  verdict: 'verdict',
-  reveal: 'reveal',
-  finished: 'results',
-}
+type ExpectedPage = string | string[]
 
-export function useRoomGuard(roomId: string | undefined, current: RoomStatus | RoomStatus[]) {
-  const status = useRoomStore((s) => s.room?.status)
-  const players = useRoomStore((s) => s.players)
-  const currentUserId = useAuthStore((s) => s.user?.id)
+/**
+ * Redirects the user to the canonical page for the current room state and role.
+ * It protects against stale refreshes, manual URL edits, and judge/player page mixups.
+ */
+export function useRoomGuard(
+  roomId: string | undefined,
+  current: RoomStatus | RoomStatus[],
+  expectedPage?: ExpectedPage,
+) {
+  const room = useRoomStore((s: RoomStore) => s.room)
+  const players = useRoomStore((s: RoomStore) => s.players)
   const navigate = useNavigate()
-  const ready = useRef(false)
+  const currentUserId = useCurrentUser()
+
+  const status = room?.status
+  const myRole = players.find(p => p.player_id === currentUserId)?.role
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      ready.current = true
-    }, 500)
-    return () => clearTimeout(t)
-  }, [])
+    if (!status || !roomId) return
 
-  useEffect(() => {
-    if (!status || !roomId || !ready.current) return
+    const allowedStatuses = Array.isArray(current) ? current : [current]
+    const expectedPages = expectedPage ? (Array.isArray(expectedPage) ? expectedPage : [expectedPage]) : null
+    const decision = shouldRedirectToCanonicalRoomPage({
+      roomId,
+      status,
+      role: myRole,
+      allowedStatuses,
+      expectedPages,
+    })
 
-    const allowed = Array.isArray(current) ? current : [current]
-    if (allowed.includes(status)) return
+    if (!decision.shouldRedirect || !decision.canonicalPath) return
 
-    const me = players.find((player) => player.player_id === currentUserId)
-    const isJudge = me?.role === 'judge'
-    const target = isJudge && (status === 'in_session' || status === 'verdict') ? 'judge' : STATUS_ROUTES[status]
-
-    if (target) navigate(`/room/${roomId}/${target}`, { replace: true })
-  }, [current, currentUserId, navigate, players, roomId, status])
+    navigate(decision.canonicalPath, { replace: true })
+  }, [status, roomId, myRole, navigate, current, expectedPage])
 }

@@ -1,23 +1,56 @@
 // supabase/functions/start-game/index.ts
-// Selects a random case, assigns roles, sets room to 'starting'
 // @ts-ignore deno imports
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
 
-function formatHints(raw: unknown): string {
-  if (!raw || typeof raw !== 'object') return ''
-  const lines = Object.entries(raw as Record<string, unknown>).flatMap(([key, value]) => {
-    if (Array.isArray(value)) {
-      return value
-        .filter((item): item is string => typeof item === 'string')
-        .map((item) => `- ${key}: ${item}`)
-    }
-    if (typeof value === 'string' && value.trim()) {
-      return [`- ${key}: ${value}`]
-    }
-    return []
+type PlayerRow = { player_id: string }
+type RoomRow = {
+  id: string
+  host_id: string
+  status: string
+  case_id: string | null
+}
+type CaseTemplate = {
+  id: string
+  title: string
+}
+type RoleCardRow = {
+  role: string
+  private_info: string
+  win_condition: string
+  hints?: Record<string, unknown> | null
+}
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   })
-  return lines.length ? `\n\nملاحظات إضافية لك:\n${lines.join('\n')}` : ''
+}
+
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items]
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[copy[i], copy[j]] = [copy[j], copy[i]]
+  }
+  return copy
+}
+
+function enrichPrivateInfo(privateInfo: string, hints: Record<string, unknown> | null | undefined): string {
+  if (!hints || typeof hints !== 'object' || Array.isArray(hints)) return privateInfo
+
+  const hintLines = Object.entries(hints)
+    .map(([key, value]) => {
+      if (typeof value !== 'string' || !value.trim()) return null
+      const cleanKey = key.replace(/_/g, ' ').trim()
+      return `- ${cleanKey}: ${value.trim()}`
+    })
+    .filter((line): line is string => Boolean(line))
+
+  if (hintLines.length === 0) return privateInfo
+
+  return `${privateInfo}\n\nأوراق تساعدك في النقاش:\n${hintLines.join('\n')}`
 }
 
 Deno.serve(async (req: Request) => {
@@ -25,142 +58,156 @@ Deno.serve(async (req: Request) => {
 
   try {
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) {
-      return new Response(JSON.stringify({ ok: false, error: 'Missing Authorization header' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    if (!authHeader) throw new Error('Missing authorization header')
 
-    const userClient = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!, {
-      global: { headers: { Authorization: authHeader } },
-    })
-    const {
-      data: { user },
-      error: authError,
-    } = await userClient.auth.getUser()
-    if (authError || !user) {
-      return new Response(JSON.stringify({ ok: false, error: 'Unauthorized' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    const userClient = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_ANON_KEY')!,
+      { global: { headers: { Authorization: authHeader } } }
+    )
+    const { data: { user }, error: authError } = await userClient.auth.getUser()
+    if (authError || !user) throw new Error('Unauthorized')
 
-    const body = await req.json().catch(() => ({}))
-    const { roomId } = body
+    const { roomId, expectedStatus = 'waiting' } = await req.json()
     if (!roomId) throw new Error('roomId is required')
 
-    const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+    const admin = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    )
 
-    const { data: room, error: roomErr } = await admin.from('game_rooms').select('*').eq('id', roomId).single()
+    const { data: room, error: roomErr } = await admin
+      .from('game_rooms')
+      .select('id, host_id, status, case_id')
+      .eq('id', roomId)
+      .single<RoomRow>()
     if (roomErr || !room) throw new Error('Room not found')
-    if (room.host_id !== user.id) throw new Error('فقط المضيف يمكنه بدء اللعبة')
+    if (room.host_id !== user.id) throw new Error('Only host can start game')
 
-    if (room.status !== 'waiting') {
-      return new Response(JSON.stringify({ ok: true, idempotent: true, status: room.status }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+    if (room.status !== expectedStatus) {
+      if (room.status !== 'waiting') {
+        const { data: existingCase } = await admin
+          .from('case_templates')
+          .select('title')
+          .eq('id', room.case_id)
+          .maybeSingle<{ title: string }>()
+
+        return json({
+          ok: true,
+          idempotent: true,
+          stale_request: true,
+          room_status: room.status,
+          case_title: existingCase?.title,
+        })
+      }
+      throw new Error(`Room must be ${expectedStatus} to start game`)
     }
 
     const { data: players, error: playersErr } = await admin
       .from('room_players')
-      .select('player_id, is_ready')
+      .select('player_id')
       .eq('room_id', roomId)
-
+      .order('joined_at', { ascending: true })
+      .returns<PlayerRow[]>()
     if (playersErr || !players) throw new Error('Failed to fetch players')
 
-    const playerCount = players.length
-    if (playerCount < 4) throw new Error(`تحتاج 4 لاعبين على الأقل، يوجد ${playerCount} حالياً`)
-
-    const notReady = players.filter((p) => !p.is_ready)
-    if (notReady.length > 0) throw new Error(`${notReady.length} لاعبين لم يضغطوا جاهز بعد`)
+    const uniquePlayerIds = [...new Set(players.map((p) => p.player_id))]
+    const playerCount = uniquePlayerIds.length
+    if (playerCount < 4) throw new Error(`Need at least 4 players, have ${playerCount}`)
+    if (players.length !== playerCount) throw new Error('Duplicate player membership detected')
 
     const { data: cases, error: casesErr } = await admin
       .from('case_templates')
-      .select('*')
+      .select('id, title')
       .eq('is_active', true)
       .lte('min_players', playerCount)
       .gte('max_players', playerCount)
-
-    if (casesErr) throw new Error('فشل جلب القضايا: ' + casesErr.message)
+      .returns<CaseTemplate[]>()
+    if (casesErr) throw new Error('Failed to fetch cases: ' + casesErr.message)
     if (!cases || cases.length === 0) {
-      throw new Error(`لا توجد قضايا متاحة لـ ${playerCount} لاعبين. أضف قضايا في Supabase تدعم هذا العدد.`)
+      throw new Error(`No cases available for ${playerCount} players. Please add cases to the database.`)
     }
 
-    const caseIds = cases.map((entry) => entry.id)
-    const { data: allRoleCards, error: cardsErr } = await admin
-      .from('case_role_cards')
-      .select('*')
-      .in('case_id', caseIds)
+    let selectedCase: CaseTemplate | null = null
+    let selectedCards: RoleCardRow[] | null = null
+    for (const candidate of shuffle(cases)) {
+      const { data: roleCards, error: cardsErr } = await admin
+        .from('case_role_cards')
+        .select('role, private_info, win_condition, hints')
+        .eq('case_id', candidate.id)
+        .returns<RoleCardRow[]>()
 
-    if (cardsErr || !allRoleCards?.length) {
-      throw new Error('لا توجد بطاقات أدوار لهذه القضايا')
-    }
-
-    const grouped = new Map<string, typeof allRoleCards>()
-    for (const card of allRoleCards) {
-      const existing = grouped.get(card.case_id) ?? []
-      existing.push(card)
-      grouped.set(card.case_id, existing)
-    }
-
-    const eligibleCases = cases.filter((entry) => {
-      const cards = grouped.get(entry.id) ?? []
-      return cards.length === playerCount && cards.some((card) => card.role === 'judge')
-    })
-
-    if (!eligibleCases.length) {
-      throw new Error(`لا توجد قضية مجهزة بعدد بطاقات يطابق ${playerCount} لاعبًا بالضبط.`)
-    }
-
-    const selectedCase = eligibleCases[Math.floor(Math.random() * eligibleCases.length)]
-    const roleCards = [...(grouped.get(selectedCase.id) ?? [])]
-
-    const shuffledPlayers = [...players].sort(() => Math.random() - 0.5)
-    const shuffledRoles = [...roleCards].sort(() => Math.random() - 0.5)
-
-    const assignments = shuffledPlayers.map((player, index) => {
-      const roleCard = shuffledRoles[index]
-      return {
-        room_id: roomId,
-        player_id: player.player_id,
-        role: roleCard.role,
-        private_info: `${roleCard.private_info}${formatHints(roleCard.hints)}`,
-        win_condition: roleCard.win_condition,
-        knows_truth: ['defendant', 'defense_attorney'].includes(roleCard.role),
+      if (cardsErr) throw new Error('Failed to fetch case role cards: ' + cardsErr.message)
+      if (!roleCards) continue
+      if (roleCards.length === playerCount) {
+        selectedCase = candidate
+        selectedCards = roleCards
+        break
       }
-    })
+    }
+
+    if (!selectedCase || !selectedCards) {
+      throw new Error(`No case has exactly ${playerCount} role cards. Add a matching case before starting.`)
+    }
+
+    const shuffledPlayers = shuffle(uniquePlayerIds)
+    const shuffledRoles = shuffle(selectedCards)
+    const assignments = shuffledPlayers.map((playerId, index) => ({
+      room_id: roomId,
+      player_id: playerId,
+      role: shuffledRoles[index].role,
+      private_info: enrichPrivateInfo(shuffledRoles[index].private_info, shuffledRoles[index].hints),
+      win_condition: shuffledRoles[index].win_condition,
+      knows_truth: ['defendant', 'defense_attorney'].includes(shuffledRoles[index].role),
+    }))
 
     for (const assignment of assignments) {
-      const { error: roleErr } = await admin
+      const { error } = await admin
         .from('room_players')
         .update({ role: assignment.role })
         .eq('room_id', roomId)
         .eq('player_id', assignment.player_id)
-      if (roleErr) console.warn('[start-game] role update error:', roleErr.message)
+      if (error) throw new Error('Failed to assign player role: ' + error.message)
     }
 
-    const { error: insertErr } = await admin
+    const { error: roleDataErr } = await admin
       .from('player_role_data')
       .upsert(assignments, { onConflict: 'room_id,player_id' })
-    if (insertErr) throw new Error('Failed to insert role data: ' + insertErr.message)
+    if (roleDataErr) throw new Error('Failed to save role data: ' + roleDataErr.message)
 
-    const { error: updateErr } = await admin
+    const { data: roomUpdate, error: updateErr } = await admin
       .from('game_rooms')
       .update({ case_id: selectedCase.id, status: 'starting' })
       .eq('id', roomId)
       .eq('status', 'waiting')
-    if (updateErr) throw new Error('Failed to update room: ' + updateErr.message)
+      .select('id')
+      .maybeSingle<{ id: string }>()
 
-    return new Response(JSON.stringify({ ok: true, case_title: selectedCase.title }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    if (updateErr) throw new Error(updateErr.message)
+    if (!roomUpdate) {
+      const { data: latestRoom } = await admin
+        .from('game_rooms')
+        .select('status, case_id')
+        .eq('id', roomId)
+        .maybeSingle<{ status: string; case_id: string | null }>()
+
+      const { data: latestCase } = latestRoom?.case_id
+        ? await admin.from('case_templates').select('title').eq('id', latestRoom.case_id).maybeSingle<{ title: string }>()
+        : { data: null }
+
+      return json({
+        ok: true,
+        idempotent: true,
+        stale_request: true,
+        room_status: latestRoom?.status,
+        case_title: latestCase?.title ?? selectedCase.title,
+      })
+    }
+
+    return json({ ok: true, case_title: selectedCase.title })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error('[start-game] error:', msg)
-    return new Response(JSON.stringify({ ok: false, error: msg }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    console.error('[start-game]', msg)
+    return json({ ok: false, error: msg }, 400)
   }
 })

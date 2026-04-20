@@ -1,78 +1,64 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '@/components/layout'
-import { Button, Card } from '@/components/ui'
+import { Button, Input, Card } from '@/components/ui'
 import { joinRoom } from '@/actions'
+import { normalizeErrorMessage } from '@/lib/utils'
 
 export default function JoinRoom() {
-  const navigate          = useNavigate()
+  const navigate = useNavigate()
   const { code: urlCode } = useParams<{ code?: string }>()
 
-  const [code, setCode]     = useState((urlCode ?? '').toUpperCase())
+  const [code, setCode]     = useState(urlCode?.toUpperCase() ?? '')
   const [loading, setLoading] = useState(false)
   const [error, setError]   = useState('')
-  const inputRef = useRef<HTMLInputElement>(null)
 
-  // Auto-submit if full code comes from URL
   useEffect(() => {
-    if (urlCode && urlCode.length === 6) {
-      handleJoin(urlCode.toUpperCase())
-    } else {
-      inputRef.current?.focus()
-    }
-  }, [])
+    if (urlCode) setCode(urlCode.toUpperCase())
+  }, [urlCode])
 
-  async function handleJoin(codeToJoin?: string) {
-    const finalCode = (codeToJoin ?? code).trim().toUpperCase()
-    if (finalCode.length !== 6) return
+  async function handleJoin(e: React.FormEvent) {
+    e.preventDefault()
+    if (loading || !code.trim()) return
     setLoading(true)
     setError('')
     try {
-      const room = await joinRoom(finalCode)
+      const room = await joinRoom(code)
       navigate(`/room/${room.id}/lobby`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'فشل الانضمام')
+      setError(normalizeErrorMessage(err, 'فشل الانضمام'))
+    } finally {
       setLoading(false)
     }
-  }
-
-  function onSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    handleJoin()
   }
 
   return (
     <AppShell>
       <div className="min-h-screen flex items-center justify-center px-4">
-        <div className="w-full max-w-xs space-y-6">
+        <div className="w-full max-w-sm space-y-6">
 
           <div className="text-center">
             <div className="text-5xl mb-3">🚪</div>
             <h1 className="font-display text-3xl text-gold mb-1">الانضمام لغرفة</h1>
-            <p className="text-ink-400 text-sm">أدخل كود الغرفة المكوّن من 6 أحرف</p>
+            <p className="text-ink-400 text-sm">أدخل الكود المكوّن من 6 أحرف</p>
           </div>
 
           <Card>
-            <form onSubmit={onSubmit} className="space-y-4">
+            <form onSubmit={handleJoin} className="space-y-4">
               <div className="space-y-2">
                 <p className="label-sm text-center">كود الغرفة</p>
                 <input
-                  ref={inputRef}
                   type="text"
                   value={code}
-                  onChange={e => {
-                    setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))
-                    setError('')
-                  }}
+                  onChange={e => setCode(e.target.value.toUpperCase().slice(0, 6))}
                   placeholder="ABC123"
                   maxLength={6}
                   className="w-full bg-ink-900 border border-gold/40 text-gold text-center
                              text-4xl font-mono font-bold tracking-[0.5em] py-4 rounded-xl
-                             focus:outline-none focus:border-gold uppercase
-                             placeholder:text-ink-700"
+                             focus:outline-none focus:border-gold/80 focus:ring-2 focus:ring-gold/20
+                             placeholder:text-ink-700 uppercase"
                   dir="ltr"
-                  autoCapitalize="characters"
-                  autoComplete="off"
+                  autoFocus
                 />
               </div>
 

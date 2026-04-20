@@ -1,41 +1,30 @@
 import { createClient } from '@supabase/supabase-js'
+import { normalizeErrorMessage } from '@/lib/utils'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+const supabaseUrl  = import.meta.env.VITE_SUPABASE_URL  as string
+const supabaseKey  = import.meta.env.VITE_SUPABASE_ANON_KEY as string
 
 if (!supabaseUrl || !supabaseKey) {
-  throw new Error(
-    'Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY.\n' +
-    'Copy .env.example to .env and fill in your Supabase credentials.'
-  )
+  throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY in .env')
 }
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
-    persistSession:   true,
+    persistSession:  true,
     autoRefreshToken: true,
-    storageKey:       'courthouse-auth-v2',
-    // Anonymous sessions persist across page loads
-    detectSessionInUrl: false,
+    storageKey: 'courthouse-auth',
   },
   realtime: {
-    params: { eventsPerSecond: 10 },
-  },
+    params: { eventsPerSecond: 10 }
+  }
 })
 
-/**
- * Call a Supabase Edge Function with the current user's JWT.
- * Throws with a human-readable Arabic error on failure.
- */
-export async function callEdgeFunction<T = { ok: boolean; error?: string }>(
+export async function callEdgeFunction<T = unknown>(
   name: string,
   body: Record<string, unknown>
 ): Promise<T> {
   const { data: { session } } = await supabase.auth.getSession()
-
-  if (!session?.access_token) {
-    throw new Error('يجب تسجيل الدخول أولاً')
-  }
+  if (!session) throw new Error('Not authenticated')
 
   let response: Response
   try {
@@ -46,27 +35,32 @@ export async function callEdgeFunction<T = { ok: boolean; error?: string }>(
         headers: {
           'Content-Type':  'application/json',
           'Authorization': `Bearer ${session.access_token}`,
-          'apikey':        supabaseKey,
         },
         body: JSON.stringify(body),
       }
     )
-  } catch (networkErr) {
-    console.error(`[callEdgeFunction:${name}] Network error`, networkErr)
-    throw new Error('خطأ في الشبكة — تحقق من اتصالك بالإنترنت')
+  } catch (error) {
+    throw new Error(normalizeErrorMessage(error, 'تعذر الاتصال بالخادم'))
   }
 
-  let result: Record<string, unknown>
+  let result: unknown = null
   try {
     result = await response.json()
   } catch {
-    throw new Error(`الخادم أرجع استجابة غير صالحة (${response.status})`)
+    if (!response.ok) {
+      throw new Error(`فشل الطلب (${response.status})`)
+    }
   }
 
-  if (!response.ok || result.ok === false) {
-    const errMsg = (result.error as string) ?? `خطأ من الخادم (${response.status})`
-    console.error(`[callEdgeFunction:${name}]`, errMsg, result)
-    throw new Error(errMsg)
+  if (!response.ok) {
+    const message = result && typeof result === 'object' && 'error' in result
+      ? normalizeErrorMessage((result as { error?: unknown }).error, `فشل الطلب (${response.status})`)
+      : `فشل الطلب (${response.status})`
+    throw new Error(message)
+  }
+
+  if (result && typeof result === 'object' && 'ok' in result && !(result as { ok?: boolean }).ok) {
+    throw new Error(normalizeErrorMessage(result, 'Edge function error'))
   }
 
   return result as T

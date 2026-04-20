@@ -1,50 +1,24 @@
 // supabase/functions/reveal-truth/index.ts
+// Legacy helper retained for compatibility. If a room is already finished,
+// it simply returns the stored summary and results.
 // @ts-ignore deno imports
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
 
 type VerdictValue = 'guilty' | 'innocent'
+
 type Role = 'defendant' | 'defense_attorney' | 'prosecutor' | 'judge' | 'deputy' | 'witness'
 
-function computeWin(
-  role: Role,
-  finalVerdict: VerdictValue,
-  actualVerdict: VerdictValue
-): { did_win: boolean; reason: string } {
+function computeWin(role: Role, finalVerdict: VerdictValue, actualVerdict: VerdictValue) {
   const match = finalVerdict === actualVerdict
   switch (role) {
-    case 'defendant':
-      return {
-        did_win: finalVerdict === 'innocent',
-        reason: finalVerdict === 'innocent' ? 'صدر الحكم ببراءته' : 'صدر الحكم بإدانته',
-      }
-    case 'defense_attorney':
-      return {
-        did_win: finalVerdict === 'innocent',
-        reason: finalVerdict === 'innocent' ? 'نجح في إثبات البراءة' : 'فشل في الدفاع عن موكله',
-      }
-    case 'prosecutor':
-      return {
-        did_win: finalVerdict === 'guilty',
-        reason: finalVerdict === 'guilty' ? 'نجح في إثبات الإدانة' : 'فشل في إثبات التهمة',
-      }
-    case 'judge':
-      return {
-        did_win: match,
-        reason: match ? 'حكمه طابق الحقيقة الفعلية' : 'حكمه لم يطابق الحقيقة',
-      }
-    case 'deputy':
-      return {
-        did_win: match,
-        reason: match ? 'ساهم في إيصال القضية للحقيقة' : 'لم تسفر جهوده عن النتيجة الصحيحة',
-      }
-    case 'witness':
-      return {
-        did_win: match,
-        reason: match ? 'شهادته أسهمت في الوصول للحقيقة' : 'شهادته لم تُفضِ للنتيجة الصحيحة',
-      }
-    default:
-      return { did_win: false, reason: 'دور غير معروف' }
+    case 'defendant': return { did_win: finalVerdict === 'innocent', reason: finalVerdict === 'innocent' ? 'صدر الحكم ببراءته' : 'صدر الحكم بإدانته' }
+    case 'defense_attorney': return { did_win: finalVerdict === 'innocent', reason: finalVerdict === 'innocent' ? 'نجح في إثبات البراءة' : 'فشل في الدفاع عن موكله' }
+    case 'prosecutor': return { did_win: finalVerdict === 'guilty', reason: finalVerdict === 'guilty' ? 'نجح في إثبات الإدانة' : 'فشل في إثبات التهمة' }
+    case 'judge': return { did_win: match, reason: match ? 'حكمه طابق الحقيقة الفعلية' : 'حكمه لم يطابق الحقيقة' }
+    case 'deputy': return { did_win: match, reason: match ? 'ساعد في الوصول للحقيقة' : 'لم يؤدِّ إلى النتيجة الصحيحة' }
+    case 'witness': return { did_win: match, reason: match ? 'شهادته ساعدت في الوصول للحقيقة' : 'شهادته لم تؤدِّ للحقيقة' }
+    default: return { did_win: false, reason: 'دور غير معروف' }
   }
 }
 
@@ -53,171 +27,131 @@ Deno.serve(async (req: Request) => {
 
   try {
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'Missing Authorization header' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
+    if (!authHeader) throw new Error('Missing authorization header')
 
     const userClient = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_ANON_KEY')!,
-      { global: { headers: { Authorization: authHeader } } }
+      { global: { headers: { Authorization: authHeader } } },
     )
     const { data: { user }, error: authErr } = await userClient.auth.getUser()
-    if (authErr || !user) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'Unauthorized' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
+    if (authErr || !user) throw new Error('Unauthorized')
 
-    const body = await req.json().catch(() => ({}))
-    const { roomId } = body
+    const { roomId, expectedStatus = 'reveal' } = await req.json()
     if (!roomId) throw new Error('roomId is required')
 
     const admin = createClient(
       Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     )
 
-    // Verify caller is host or judge
-    const { data: callerPlayer } = await admin
+    const { data: membership } = await admin
       .from('room_players')
-      .select('role, is_host')
+      .select('player_id')
       .eq('room_id', roomId)
       .eq('player_id', user.id)
       .single()
+    if (!membership) throw new Error('You are not a member of this room')
 
-    if (!callerPlayer) throw new Error('You are not in this room')
-    const canReveal = callerPlayer.is_host || callerPlayer.role === 'judge'
-    if (!canReveal) throw new Error('Only host or judge can reveal truth')
-
-    // Fetch room + case
     const { data: room, error: roomErr } = await admin
       .from('game_rooms')
-      .select('*, case_templates(actual_verdict, hidden_truth, title)')
+      .select('*, case_templates(actual_verdict, hidden_truth)')
       .eq('id', roomId)
       .single()
-
     if (roomErr || !room) throw new Error('Room not found')
-    if (!['verdict', 'reveal', 'finished'].includes(room.status)) {
-      throw new Error('Room not in verdict/reveal phase (status: ' + room.status + ')')
-    }
 
-    const ct = room.case_templates as {
-      actual_verdict: string
-      hidden_truth: string
-      title: string
-    }
+    const { data: existingVerdict } = await admin
+      .from('verdicts')
+      .select('*')
+      .eq('room_id', roomId)
+      .single()
 
-    if (!ct) throw new Error('No case assigned to this room')
-
-    // Idempotent: if already revealed, return existing results
-    if (room.status === 'reveal' || room.status === 'finished') {
+    if (room.status === 'finished' && existingVerdict?.actual_verdict) {
       const { data: existingResults } = await admin
         .from('game_results')
         .select('*, profiles(username)')
         .eq('room_id', roomId)
 
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          actual_verdict: ct.actual_verdict,
-          hidden_truth:   ct.hidden_truth,
-          results: existingResults ?? [],
-          idempotent: true,
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
+      return new Response(JSON.stringify({
+        ok: true,
+        idempotent: true,
+        stale_request: expectedStatus !== 'finished',
+        actual_verdict: existingVerdict.actual_verdict,
+        hidden_truth: existingVerdict.hidden_truth,
+        results: existingResults ?? [],
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // Fetch verdict
-    const { data: verdictRow, error: verdictErr } = await admin
-      .from('verdicts')
-      .select('verdict')
-      .eq('room_id', roomId)
-      .single()
+    if (!['verdict', 'reveal'].includes(room.status)) throw new Error('Room not in verdict/reveal phase')
+    if (room.host_id !== user.id) throw new Error('Only host can reveal truth')
+    if (!existingVerdict?.verdict) throw new Error('No verdict submitted')
 
-    if (verdictErr || !verdictRow) {
-      throw new Error('No verdict submitted yet. Judge must submit verdict first.')
+    if (expectedStatus && room.status !== expectedStatus) {
+      return new Response(JSON.stringify({
+        ok: true,
+        idempotent: true,
+        stale_request: true,
+        actual_verdict: existingVerdict.actual_verdict ?? null,
+        hidden_truth: existingVerdict.hidden_truth ?? null,
+        results: [],
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    const actualVerdict = ct.actual_verdict as VerdictValue
-    const finalVerdict  = verdictRow.verdict as VerdictValue
+    const caseData = room.case_templates as { actual_verdict: VerdictValue; hidden_truth: string } | null
+    if (!caseData) throw new Error('Case data missing')
 
-    // Fetch all players with roles
     const { data: players, error: playersErr } = await admin
-      .from('room_players')
-      .select('player_id, role')
-      .eq('room_id', roomId)
+      .from('room_players').select('player_id, role').eq('room_id', roomId)
+    if (playersErr || !players) throw new Error('Failed to fetch players')
 
-    if (playersErr || !players?.length) {
-      throw new Error('Failed to fetch players')
-    }
-
-    // Compute win/lose for each player
     const results = players
-      .filter(p => p.role)
-      .map(p => {
-        const { did_win, reason } = computeWin(
-          p.role as Role, finalVerdict, actualVerdict
-        )
-        return {
-          room_id:   roomId,
-          player_id: p.player_id,
-          role:      p.role,
-          did_win,
-          reason,
-        }
+      .filter((p) => p.role)
+      .map((p) => {
+        const { did_win, reason } = computeWin(p.role as Role, existingVerdict.verdict as VerdictValue, caseData.actual_verdict)
+        return { room_id: roomId, player_id: p.player_id, role: p.role, did_win, reason }
       })
 
-    // Upsert results
-    const { error: insertErr } = await admin
-      .from('game_results')
-      .upsert(results, { onConflict: 'room_id,player_id' })
+    await admin.from('game_results').upsert(results, { onConflict: 'room_id,player_id' })
+    await admin.from('verdicts').update({
+      actual_verdict: caseData.actual_verdict,
+      hidden_truth: caseData.hidden_truth,
+      judge_was_correct: existingVerdict.verdict === caseData.actual_verdict,
+    }).eq('room_id', roomId)
 
-    if (insertErr) throw new Error('Failed to save results: ' + insertErr.message)
-
-    // System event
-    await admin.from('game_events').insert({
-      room_id:     roomId,
-      player_id:   null,
-      event_type:  'system',
-      session_num: 3,
-      content: `الحقيقة: المتهم ${actualVerdict === 'guilty' ? 'مذنب' : 'بريء'} فعلاً — ` +
-               `حكم القاضي كان ${finalVerdict === actualVerdict ? 'صحيحاً ✓' : 'خاطئاً ✗'}`,
-    })
-
-    // Mark room as reveal
-    await admin
-      .from('game_rooms')
-      .update({ status: 'reveal' })
+    const { data: finishedRooms } = await admin.from('game_rooms')
+      .update({ status: 'finished', session_ends_at: null })
       .eq('id', roomId)
+      .eq('status', room.status)
+      .select('id')
 
-    console.info(`[reveal-truth] room=${roomId} actual=${actualVerdict} judge_verdict=${finalVerdict}`)
+    if (!finishedRooms || finishedRooms.length === 0) {
+      const { data: existingResults } = await admin
+        .from('game_results')
+        .select('*, profiles(username)')
+        .eq('room_id', roomId)
 
-    return new Response(
-      JSON.stringify({
+      return new Response(JSON.stringify({
         ok: true,
-        actual_verdict: actualVerdict,
-        hidden_truth:   ct.hidden_truth,
-        results: results.map(r => ({
-          player_id: r.player_id,
-          role:      r.role,
-          did_win:   r.did_win,
-          reason:    r.reason,
-        })),
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+        idempotent: true,
+        stale_request: true,
+        actual_verdict: caseData.actual_verdict,
+        hidden_truth: caseData.hidden_truth,
+        results: existingResults ?? [],
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    }
+
+    return new Response(JSON.stringify({
+      ok: true,
+      actual_verdict: caseData.actual_verdict,
+      hidden_truth: caseData.hidden_truth,
+      results,
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error('[reveal-truth] error:', msg)
-    return new Response(
-      JSON.stringify({ ok: false, error: msg }),
-      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    console.error('[reveal-truth]', msg)
+    return new Response(JSON.stringify({ ok: false, error: msg }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
   }
 })

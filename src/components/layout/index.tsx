@@ -1,105 +1,83 @@
 import React, { useMemo, useState } from 'react'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/stores/authStore'
-import { useRoomStore } from '@/stores/roomStore'
-import { Spinner } from '@/components/ui'
+import { Spinner, Button } from '@/components/ui'
 import { Modal } from '@/components/ui/Modal'
-import { Button } from '@/components/ui'
-import { leaveRoom } from '@/actions'
-import { useToast } from '@/hooks/useToast'
 
 export function ProtectedRoute({ children }: { children?: React.ReactNode }) {
   const { user, loading } = useAuthStore()
-  const location = useLocation()
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-ink-900 flex items-center justify-center">
-        <Spinner size={28} />
-      </div>
-    )
-  }
-  if (!user) return <Navigate to="/auth" state={{ from: location }} replace />
+  if (loading) return (
+    <div className="min-h-screen courtroom-bg flex items-center justify-center">
+      <Spinner size={32} />
+    </div>
+  )
+  if (!user) return <Navigate to="/auth" replace />
   return children ? <>{children}</> : <Outlet />
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+function HomeShortcut() {
   const location = useLocation()
   const navigate = useNavigate()
-  const toast = useToast()
-  const room = useRoomStore((s) => s.room)
-  const resetRoom = useRoomStore((s) => s.reset)
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const [showExitConfirm, setShowExitConfirm] = useState(false)
-  const [leaving, setLeaving] = useState(false)
-
-  const showHomeButton = location.pathname !== '/'
+  const isHome = location.pathname === '/'
   const isRoomRoute = location.pathname.startsWith('/room/')
-  const exitCopy = useMemo(() => {
-    if (!isRoomRoute) return 'ستعود إلى الصفحة الرئيسية.'
-    if (room?.status === 'waiting') {
-      return 'ستغادر الغرفة وتعود إلى الصفحة الرئيسية. إذا كنت في اللوبي فسيتم حذف عضويتك من الغرفة.'
-    }
-    return 'ستغادر شاشة الغرفة وتعود إلى الصفحة الرئيسية. يمكن الرجوع لاحقاً إذا كانت اللعبة ما زالت مستمرة.'
-  }, [isRoomRoute, room?.status])
+  const shouldShow = !isHome
+  const helperText = useMemo(() => {
+    if (!isRoomRoute) return ''
+    return 'سيتم إغلاق شاشة الغرفة والعودة للرئيسية. يمكنك العودة للغرفة لاحقًا من زر العودة إلى الغرفة الحالية طالما اللعبة لم تنتهِ.'
+  }, [isRoomRoute])
 
-  async function handleGoHome() {
-    if (!isRoomRoute) {
-      navigate('/')
+  if (!shouldShow) return null
+
+  const handleHomeClick = () => {
+    if (isRoomRoute) {
+      setConfirmOpen(true)
       return
     }
-    setShowExitConfirm(true)
-  }
-
-  async function confirmGoHome() {
-    try {
-      setLeaving(true)
-      if (room?.id && room.status === 'waiting') {
-        await leaveRoom(room.id)
-      }
-      resetRoom()
-      navigate('/')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'تعذر الخروج من الغرفة')
-    } finally {
-      setLeaving(false)
-      setShowExitConfirm(false)
-    }
+    navigate('/')
   }
 
   return (
-    <div className="min-h-screen courtroom-bg font-body text-parch-100">
-      {showHomeButton && (
-        <button
-          type="button"
-          onClick={handleGoHome}
-          className="fixed top-4 left-4 z-40 rounded-xl border border-gold/20 bg-ink-900/70 px-3 py-2 text-sm text-parch-200 shadow-lg backdrop-blur transition hover:border-gold/50 hover:text-gold"
-          title="العودة للرئيسية"
-        >
-          🏠
-        </button>
-      )}
-
-      <div className="relative z-10">{children}</div>
-
-      <Modal
-        open={showExitConfirm}
-        onClose={() => !leaving && setShowExitConfirm(false)}
-        title="العودة إلى الرئيسية"
-        size="sm"
+    <>
+      <button
+        type="button"
+        onClick={handleHomeClick}
+        title="العودة إلى الصفحة الرئيسية"
+        className="fixed top-4 left-4 z-40 w-11 h-11 rounded-full border border-gold/25 bg-ink-900/80 backdrop-blur text-parch-100 shadow-soft hover:border-gold/50 hover:text-gold transition-all"
       >
-        <div className="space-y-4 text-right">
-          <p className="text-sm text-parch-200 leading-relaxed">{exitCopy}</p>
-          <div className="flex gap-2">
-            <Button variant="ghost" className="flex-1" onClick={() => setShowExitConfirm(false)} disabled={leaving}>
-              إلغاء
+        <span className="text-lg">🏠</span>
+      </button>
+
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title="العودة إلى الصفحة الرئيسية" size="sm">
+        <div className="space-y-5">
+          <p className="text-sm text-parch-200 leading-7">{helperText}</p>
+          <div className="flex gap-3">
+            <Button variant="ghost" className="flex-1" onClick={() => setConfirmOpen(false)}>
+              البقاء في الغرفة
             </Button>
-            <Button variant="primary" className="flex-1" onClick={confirmGoHome} loading={leaving}>
-              تأكيد
+            <Button
+              variant="primary"
+              className="flex-1"
+              onClick={() => {
+                setConfirmOpen(false)
+                navigate('/')
+              }}
+            >
+              نعم، ارجع للرئيسية
             </Button>
           </div>
         </div>
       </Modal>
+    </>
+  )
+}
+
+export function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-h-screen courtroom-bg font-body text-parch-100">
+      <HomeShortcut />
+      <div className="relative z-10">{children}</div>
     </div>
   )
 }

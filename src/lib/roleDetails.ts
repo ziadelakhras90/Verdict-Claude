@@ -1,70 +1,143 @@
-import type { PublicCaseInfo, Role, RoleCard } from '@/lib/types'
+import type { PublicCaseInfo, RoleCard, Role } from '@/lib/types'
+import { ROLE_LABELS } from '@/lib/types'
 
-const ROLE_PLAYBOOK: Record<Role, { focus: string[]; pressure: string[]; prompts: string[] }> = {
+type DiscussionGuide = {
+  openingMove: string
+  focusPoints: string[]
+  questionPrompts: string[]
+  cautionPoints: string[]
+  publicAngles: string[]
+}
+
+const ROLE_PLAYBOOK: Record<Role, Omit<DiscussionGuide, 'publicAngles'>> = {
   defendant: {
-    focus: ['احمِ نفسك من التناقض', 'قدّم رواية ثابتة', 'لا تمنح خصمك تفاصيل لا تحتاجها'],
-    pressure: ['سؤالك الأول: من يستفيد من اتهامك؟', 'كرّر أن الظن لا يكفي للإدانة'],
-    prompts: ['أين كنت بالضبط وقت الحادث؟', 'من يستطيع تأكيد كلامك؟', 'ما أكثر نقطة يستغلها الادعاء ضدك؟'],
+    openingMove: 'ابدأ بهدوء: أنكر التهمة مباشرة، ثم قدم خط سيرك والزمن الذي كنت فيه بعيدًا عن الفعل.',
+    focusPoints: [
+      'ثبّت أين كنت وقت الحادثة ومن رآك.',
+      'اطلب دليلًا مباشرًا بدل الظنون والدوافع العامة.',
+      'اذكر ما يضعف فكرة أنك المستفيد الوحيد من الجريمة.',
+    ],
+    questionPrompts: [
+      'من لديه دليل مادي مباشر ضدي؟',
+      'من كان أقرب للمكان أو الأداة منّي؟',
+      'ما الجزء الذي بُني فقط على الظن لا على المشاهدة؟',
+    ],
+    cautionPoints: [
+      'لا تغيّر قصتك الزمنية أثناء النقاش.',
+      'لا تنفعل في كل نقطة؛ اختر التناقضات المهمة فقط.',
+    ],
   },
   defense_attorney: {
-    focus: ['اكسر العلاقة بين الدافع والجريمة', 'ابحث عن ثغرة في الشهادة', 'ذكّر القاضي بعبء الإثبات'],
-    pressure: ['اعترض على القفز للاستنتاجات', 'اطلب تفاصيل دقيقة من كل شاهد'],
-    prompts: ['ما الدليل المادي المباشر؟', 'هل رأيت المتهم يفعلها أم تفترض فقط؟', 'من المستفيد الحقيقي؟'],
+    openingMove: 'ابدأ ببناء الشك المعقول: فرّق بين الاشتباه وبين الإدانة، واطلب سلسلة أدلة كاملة.',
+    focusPoints: [
+      'هاجم الفجوات في الأدلة والزمن والدافع.',
+      'أعد صياغة أقوال الشهود بدقة حتى لا تُحمّل أكثر مما قالوه.',
+      'سلّط الضوء على كل بديل منطقي لم يُفحص جيدًا.',
+    ],
+    questionPrompts: [
+      'أين الدليل المباشر الذي يربط موكلي بالفعل؟',
+      'من الذي استفاد فعلاً إذا استبعدنا الرواية الظاهرة؟',
+      'هل توجد شهادة دقيقة أم مجرد استنتاجات؟',
+    ],
+    cautionPoints: [
+      'لا تَعِد القاضي بما لا تستطيع إثباته.',
+      'ركّز على تفكيك القضية بدل الاندفاع في قصة بديلة غير مكتملة.',
+    ],
   },
   prosecutor: {
-    focus: ['اربط بين الدافع والفرصة', 'حاصر التناقضات', 'حوّل الشكوك إلى تسلسل منطقي'],
-    pressure: ['اسأل عن التوقيت والسلوك والدافع', 'واجه الدفاع بما يهمله من حقائق'],
-    prompts: ['لماذا كان سلوك المتهم مريبًا؟', 'ما الحلقة الأضعف في رواية الدفاع؟', 'أي شاهد يدعم تسلسل الاتهام؟'],
+    openingMove: 'ابدأ ببناء رواية مترابطة: دافع + فرصة + سلوك مريب، ثم اطلب من الآخرين سد الثغرات إن استطاعوا.',
+    focusPoints: [
+      'حوّل التفاصيل المتفرقة إلى خط اتهام واضح.',
+      'اختبر تناقضات المتهم والشهود في التوقيت والتصرف.',
+      'اجعل القاضي يرى لماذا يبدو الاتهام منطقيًا حتى لو لم يعرف الحقيقة الكاملة.',
+    ],
+    questionPrompts: [
+      'ما تفسيركم للدافع الواضح هنا؟',
+      'من كان يملك الفرصة العملية لتنفيذ الفعل؟',
+      'ما التناقض الذي ظهر في أقوال الطرف المقابل؟',
+    ],
+    cautionPoints: [
+      'لا تعتمد على الدافع وحده إذا انهارت بقية السلسلة.',
+      'لا تبالغ في وصف ما لم يثبته شاهد أو حقيقة عامة.',
+    ],
   },
   judge: {
-    focus: ['وازن بين الروايات', 'اطلب إجابات محددة', 'اضبط إيقاع الجلسة'],
-    pressure: ['استخدم السؤال لاستخراج الحقيقة', 'اقطع التكرار وانتقل للنقطة الحاسمة'],
-    prompts: ['ما أهم نقطة غير محسومة حتى الآن؟', 'من قدّم رواية متماسكة؟', 'هل يوجد تناقض يجب توضيحه فورًا؟'],
+    openingMove: 'ابدأ بتحديد ما تريد سماعه: التسلسل الزمني، أقوى دليل لكل طرف، وأكبر تناقض لم يُفسر.',
+    focusPoints: [
+      'التمييز بين الوقائع المؤكدة وما هو استنتاج أو تفسير.',
+      'إجبار الجميع على الوضوح: من؟ متى؟ لماذا؟',
+      'تسجيل التناقضات التي تؤثر فعلًا في الحكم النهائي.',
+    ],
+    questionPrompts: [
+      'ما أقوى دليل مباشر لديكم؟',
+      'ما الفجوة الزمنية أو المنطقية التي لم تُفسر بعد؟',
+      'من لديه مصلحة في تضليل المحكمة؟',
+    ],
+    cautionPoints: [
+      'لا تعلن قناعتك مبكرًا حتى لا توجّه النقاش.',
+      'افصل بين الانطباع الشخصي وقيمة الدليل.',
+    ],
   },
   deputy: {
-    focus: ['رتّب النقاش', 'التقط التناقضات الصغيرة', 'قدّم أسئلة متابعة ذكية'],
-    pressure: ['لخّص ما قيل حتى الآن', 'ذكّر القاضي بالنقطة التي تحتاج جوابًا'],
-    prompts: ['من غيّر كلامه بين بداية الجلسة ونهايتها؟', 'أي شاهد يحتاج سؤال متابعة؟', 'ما الحقيقة التي لم يُجب عنها أحد؟'],
+    openingMove: 'ابدأ بدور تنظيمي: لخص الوقائع المعلنة واسأل عن النقاط التي لا تزال ضبابية.',
+    focusPoints: [
+      'ساعد القاضي على ترتيب الأحداث زمنيًا.',
+      'استخدم المعلومات التنظيمية أو الوثائقية لإيضاح الصورة.',
+      'اطرح أسئلة قصيرة تكشف الفراغات بين الروايات.',
+    ],
+    questionPrompts: [
+      'أي معلومة عامة لم يفسرها أحد حتى الآن؟',
+      'من كان مسؤولًا عن الترتيب أو الوصول أو الأدوات؟',
+      'أين يوجد تعارض بين ما قيل وبين الحقائق المعلنة؟',
+    ],
+    cautionPoints: [
+      'لا تتحول إلى طرف منحاز؛ دورك إبراز الوضوح.',
+      'لا تقدم استنتاجًا نهائيًا بدل القاضي.',
+    ],
   },
   witness: {
-    focus: ['التزم بما رأيت فقط', 'فرّق بين الحقيقة والانطباع', 'لا تبالغ'],
-    pressure: ['إذا لم تكن متأكدًا قل ذلك', 'دقّة الشهادة أهم من كثرتها'],
-    prompts: ['ما الذي رأيته بعينك؟', 'ما الذي سمعته لا ما افترضته؟', 'ما التفصيل الذي تتذكره بوضوح؟'],
+    openingMove: 'ابدأ بما رأيته أو سمعته فقط، واذكر حدود معرفتك بوضوح حتى تبدو شهادتك موثوقة.',
+    focusPoints: [
+      'كن دقيقًا في الوصف: ماذا رأيت بالضبط؟',
+      'فرّق بين ما شهدته شخصيًا وما سمعته من غيرك.',
+      'تفصيل صغير صادق أفضل من قصة كبيرة غير مؤكدة.',
+    ],
+    questionPrompts: [
+      'هل تريدون مني وصف ما رأيته أم ما استنتجته؟',
+      'من كان قريبًا من المكان أو الأداة وقتها؟',
+      'أي جزء من شهادتي يمكن أن يغيّر فهمكم للتوقيت؟',
+    ],
+    cautionPoints: [
+      'لا تضف تفاصيل لم تراها بنفسك.',
+      'إذا كنت غير متأكد من شيء فقل ذلك بوضوح.',
+    ],
   },
 }
 
-function normalizeHints(raw: unknown): string[] {
-  if (!raw) return []
-  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === 'string')
-  if (typeof raw === 'object') {
-    return Object.entries(raw as Record<string, unknown>)
-      .flatMap(([key, value]) => {
-        if (Array.isArray(value)) {
-          return value
-            .filter((item): item is string => typeof item === 'string')
-            .map((item) => `${key}: ${item}`)
-        }
-        if (typeof value === 'string') return [`${key}: ${value}`]
-        return []
-      })
-  }
-  return []
+function splitIntoPoints(text: string, limit = 4): string[] {
+  return text
+    .split(/[\n\.،؛!؟]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part, index, arr) => arr.indexOf(part) === index)
+    .slice(0, limit)
 }
 
-export function getRolePlaybook(role: Role) {
-  return ROLE_PLAYBOOK[role]
-}
-
-export function buildRoleSummary(card: RoleCard & { hints?: unknown }, caseInfo?: PublicCaseInfo | null) {
-  const playbook = getRolePlaybook(card.role)
-  const hintLines = normalizeHints(card.hints)
-  const publicFacts = Array.isArray(caseInfo?.public_facts) ? caseInfo?.public_facts.slice(0, 3) : []
+export function buildRoleDiscussionGuide(card: RoleCard, caseInfo?: PublicCaseInfo | null): DiscussionGuide {
+  const playbook = ROLE_PLAYBOOK[card.role as Role]
+  const privatePoints = splitIntoPoints(card.private_info, 3)
+  const winPoints = splitIntoPoints(card.win_condition, 2)
+  const publicAngles = (caseInfo?.public_facts ?? []).slice(0, 3)
 
   return {
-    focus: playbook.focus,
-    pressure: playbook.pressure,
-    prompts: playbook.prompts,
-    publicFacts,
-    hints: hintLines,
+    openingMove: playbook.openingMove,
+    focusPoints: [...privatePoints, ...playbook.focusPoints].slice(0, 5),
+    questionPrompts: playbook.questionPrompts,
+    cautionPoints: [...winPoints, ...playbook.cautionPoints].slice(0, 4),
+    publicAngles,
   }
+}
+
+export function getRoleSummaryHeadline(role: Role): string {
+  return `أنت ${ROLE_LABELS[role]} — استخدم معلوماتك لدفع النقاش في الاتجاه المناسب.`
 }

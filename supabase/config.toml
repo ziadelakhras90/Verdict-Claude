@@ -1,5 +1,5 @@
 # supabase/config.toml
-# Used by the Supabase CLI for local dev and function deployment
+# Used by the Supabase CLI for local dev and deployment
 
 [api]
 enabled = true
@@ -41,7 +41,6 @@ enable_signup = true
 double_confirm_changes = true
 enable_confirmations = false
 
-# Edge Functions — JWT verification enabled for all
 [functions.start-game]
 verify_jwt = true
 
@@ -49,9 +48,6 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.advance-session]
-verify_jwt = true
-
-[functions.submit-verdict]
 verify_jwt = true
 
 [functions.reveal-truth]

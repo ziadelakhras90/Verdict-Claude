@@ -57,6 +57,14 @@ export interface RoomPlayer {
   profiles?: Pick<Profile, 'username' | 'avatar_url'>
 }
 
+
+export interface ActiveRoomMembership {
+  room_id: string
+  is_host: boolean
+  role: Role | null
+  game_rooms: Pick<GameRoom, 'id' | 'status' | 'current_session' | 'room_code'> | null
+}
+
 export interface RoleCard {
   id:            string
   room_id:       string
@@ -90,11 +98,14 @@ export interface GameEvent {
 }
 
 export interface VerdictRow {
-  id:           string
-  room_id:      string
-  judge_id:     string
-  verdict:      VerdictValue
-  submitted_at: string
+  id:                 string
+  room_id:            string
+  judge_id:           string
+  verdict:            VerdictValue
+  actual_verdict?:    VerdictValue | null
+  hidden_truth?:      string | null
+  judge_was_correct?: boolean | null
+  submitted_at:       string
 }
 
 export interface GameResult {

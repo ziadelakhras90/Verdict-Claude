@@ -27,13 +27,11 @@ export const useToastStore = create<ToastStore>((set) => ({
 
 export function useToast() {
   const push = useToastStore((s) => s.push)
-  return useMemo(
-    () => ({
-      info: (msg: string) => push(msg, 'info'),
-      success: (msg: string) => push(msg, 'success'),
-      error: (msg: string) => push(msg, 'error'),
-      warn: (msg: string) => push(msg, 'warn'),
-    }),
-    [push],
-  )
+
+  return useMemo(() => ({
+    info: (msg: string) => push(msg, 'info'),
+    success: (msg: string) => push(msg, 'success'),
+    error: (msg: string) => push(msg, 'error'),
+    warn: (msg: string) => push(msg, 'warn'),
+  }), [push])
 }

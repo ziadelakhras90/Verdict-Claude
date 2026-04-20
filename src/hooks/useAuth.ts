@@ -1,70 +1,66 @@
-/**
- * useAuth — pure action hook, NO bootstrap logic here.
- * Bootstrap is handled once in AuthProvider (router.tsx).
- * This hook just exposes actions and reactive store state.
- */
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
 
+const PREFERRED_NAME_KEY = 'courthouse-preferred-name'
+
+export function getPreferredNameValue() {
+  return localStorage.getItem(PREFERRED_NAME_KEY) ?? ''
+}
+
 export function useAuth() {
-  const store = useAuthStore()
+  const { user, profile, loading, setUser, setProfile, setLoading } = useAuthStore()
 
-  /**
-   * Guest sign-in with name only — uses Supabase Anonymous Auth.
-   * Requires "Enable anonymous sign-ins" in Supabase Auth settings.
-   */
-  async function signInAsGuest(username: string): Promise<void> {
+  async function enterAsGuest(username: string) {
     const trimmed = username.trim()
-    if (!trimmed)           throw new Error('الاسم مطلوب')
-    if (trimmed.length < 2) throw new Error('الاسم قصير جداً — 2 أحرف على الأقل')
-    if (trimmed.length > 20) throw new Error('الاسم طويل جداً — 20 حرفاً كحد أقصى')
+    if (!trimmed) throw new Error('اسم اللاعب مطلوب')
 
-    const { data, error } = await supabase.auth.signInAnonymously({
-      options: { data: { username: trimmed } },
-    })
+    const { data: existingSession } = await supabase.auth.getSession()
 
-    if (error) {
-      // Translate common Supabase errors to Arabic
-      if (error.message.includes('Anonymous sign-ins are disabled')) {
-        throw new Error('الدخول كضيف غير مفعّل — راجع إعدادات Supabase')
+    if (!existingSession.session) {
+      const { error } = await supabase.auth.signInAnonymously()
+      if (error) {
+        if (error.message?.toLowerCase().includes('anonymous')) {
+          throw new Error('فعّل Anonymous Sign-Ins من إعدادات Supabase Auth ثم حاول مرة أخرى')
+        }
+        throw error
       }
-      throw new Error(error.message)
     }
 
-    if (!data.user) throw new Error('فشل الدخول — حاول مجدداً')
+    const { data: userData, error: userError } = await supabase.auth.getUser()
+    if (userError) throw userError
+    if (!userData.user) throw new Error('تعذر إنشاء جلسة ضيف')
 
-    // Upsert profile with chosen username
-    const { data: profile, error: profileErr } = await supabase
+    const { data, error } = await supabase
       .from('profiles')
-      .upsert({ id: data.user.id, username: trimmed }, { onConflict: 'id' })
-      .select()
+      .upsert(
+        {
+          id: userData.user.id,
+          username: trimmed,
+        },
+        { onConflict: 'id' }
+      )
+      .select('*')
       .single()
 
-    if (profileErr) {
-      // Username collision — append random suffix
-      const suffix = Math.floor(Math.random() * 999)
-      const { data: fallback } = await supabase
-        .from('profiles')
-        .upsert({ id: data.user.id, username: `${trimmed}${suffix}` }, { onConflict: 'id' })
-        .select()
-        .single()
-      store.setProfile(fallback)
-    } else {
-      store.setProfile(profile)
-    }
+    if (error) throw error
+
+    localStorage.setItem(PREFERRED_NAME_KEY, trimmed)
+    setUser(userData.user)
+    setProfile(data)
+    setLoading(false)
+    return data
   }
 
-  async function signOut(): Promise<void> {
+  function getPreferredName() {
+    return getPreferredNameValue()
+  }
+
+  async function signOut() {
     await supabase.auth.signOut()
-    store.setUser(null)
-    store.setProfile(null)
+    setUser(null)
+    setProfile(null)
+    setLoading(false)
   }
 
-  return {
-    user:           store.user,
-    profile:        store.profile,
-    loading:        store.loading,
-    signInAsGuest,
-    signOut,
-  }
+  return { user, profile, loading, enterAsGuest, getPreferredName, signOut }
 }
